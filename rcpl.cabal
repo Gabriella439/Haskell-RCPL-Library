@@ -1,0 +1,34 @@
+Name: rcpl
+Version: 1.0.0
+Cabal-Version: >=1.8.0.2
+Build-Type: Simple
+License: BSD3
+License-File: LICENSE
+Copyright: 2013 Gabriel Gonzalez
+Author: Gabriel Gonzalez
+Maintainer: Gabriel439@gmail.com
+Bug-Reports: https://github.com/Gabriel439/Haskell-RCPL-Library/issues
+Synopsis: Concurrent console input and output
+Description: Use this library to build a read-concurrent-print-loop (RCPL),
+  where input and output streams are not synchronized.
+  .
+  Key features:
+  .
+  * @readline@ handles input, providing history, tab-completion and key bindings
+  .
+  * The concurrent output stream does not clobber the input line
+  .
+  * Simple @pipes@-based API
+Category: Console, Concurrency, Pipes
+Source-Repository head
+    Type: git
+    Location: https://github.com/Gabriel439/Haskell-RCPL-Library
+
+Library
+    Build-Depends:
+        base         >= 4       && < 5   ,
+        pipes        >= 4.0     && < 4.1 ,
+        readline                   < 1.1 ,
+        text                       < 0.12
+    Exposed-Modules: RCPL
+    GHC-Options: -O2
