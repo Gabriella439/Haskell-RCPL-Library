@@ -1,16 +1,20 @@
 module RCPL (
+    -- * Concurrent reading and printing
     readLoop,
     printLoop
     ) where
 
 import Control.Monad (when)
-import Data.Text (Text, pack, unpack)
+import Data.Text (Text, pack)
+import qualified Data.Text.IO as TIO
 import Data.Char (isSpace)
 import Pipes (Producer, Consumer, request, respond, forever, lift)
 import System.Console.Readline (
     readline, addHistory, forcedUpdateDisplay, getLineBuffer )
 
 -- TODO: Throttle input
+-- TODO: Make it so that deleting input doesn't conflict with asynchronous
+--       output
 
 prompt :: String
 prompt = "> "
@@ -45,6 +49,6 @@ printLoop () = forever $ do
     lift $ do
         buffer <- getLineBuffer
         deleteInput (prompt ++ buffer)
-        putStrLn (unpack text)
+        TIO.putStrLn text
         forcedUpdateDisplay
 {-# INLINABLE printLoop #-}
