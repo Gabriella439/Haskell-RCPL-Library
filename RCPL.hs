@@ -97,7 +97,6 @@ data TerminalCommand
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
-    | ScrollReverse
     deriving (Read, Show)
 
 data Terminfo = Terminfo
@@ -109,7 +108,6 @@ data Terminfo = Terminfo
     , newline         ::        Text
     , parmLeftCursor  :: Int -> Text
     , parmRightCursor :: Int -> Text
-    , scrollReverse   ::        Text
     }
 
 -- | Events leaving the pure kernel
@@ -177,7 +175,7 @@ terminalDriver = Edge $ push ~> \cmd -> do
             when (len + 1 == w) $ yield Newline
         DeleteChar
             | numChars == 0 && numLines > 0 -> do
-                each [ScrollReverse, ParmRightCursor (w - 1), EraseChars 1]
+                each [CursorUp, ParmRightCursor (w - 1), EraseChars 1]
             | len > 0   -> each [CursorLeft, DeleteCharacter]
             | otherwise -> return ()
         DeleteBuffer -> do
@@ -208,7 +206,6 @@ getTerminfo = do
         <*> note "newline"           (pure $ T.pack "\n")
         <*> note "parm_left_cursor"  (decodeN "cub" )
         <*> note "parm_right_cursor" (decodeN "cuf" )
-        <*> note "scroll_reverse"    (decode  "ri"  )
 
 terminfo :: (Monad m) => Terminfo -> Edge m r TerminalCommand EventOut
 terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
@@ -222,7 +219,6 @@ terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
     Newline             -> newline         t
     ParmLeftCursor  n   -> parmLeftCursor  t n
     ParmRightCursor n   -> parmRightCursor t n
-    ScrollReverse       -> scrollReverse   t
 
 rcplCore :: (Monad m) => Terminfo -> Edge (StateT Status m) r EventIn EventOut
 rcplCore t = proc e -> do
