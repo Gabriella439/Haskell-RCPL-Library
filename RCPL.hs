@@ -44,7 +44,7 @@ data Status = Status
     , _buffer       :: Seq Char  -- Contents of the input buffer
     , _width        :: Int       -- Terminal width
     , _height       :: Int       -- Terminal height
-    }
+    } deriving (Eq, Show)
 
 buffer :: Lens' Status (Seq Char)
 buffer f (Status p b w h) = fmap (\b' -> Status p b' w h) (f b)
@@ -69,6 +69,7 @@ data EventIn
     | Line   Text     -- Request to print a line to stdout
     | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
+    deriving (Eq, Show)
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
@@ -78,11 +79,13 @@ data RCPLTerminal
     | DeleteChar              -- Remove a character from the end of the buffer
     | DeleteBuffer            -- Remove the entire buffer
     | ChangePrompt (Seq Char) -- Change the prompt
+    deriving (Eq, Show)
 
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
     = PseudoTerminal RCPLTerminal
     | FreshLine Text
+    deriving (Eq, Show)
 
 {-| Low-level description of console interactions
 
@@ -103,6 +106,7 @@ data TerminalCommand
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
+    deriving (Eq, Show)
 
 data Terminfo = Terminfo
     { clrEol          ::        TermOutput
