@@ -13,7 +13,7 @@ import Control.Arrow (arr, (<<<), (>>>))
 import Control.Applicative ((<|>), (<$>), (<*>), pure)
 import Control.Lens hiding ((|>), each)
 import Control.Concurrent.Async (async, link)
-import Control.Monad (replicateM_, unless, when)
+import Control.Monad (replicateM_, unless, when, void)
 import Control.Monad.Trans.State
 import Data.Foldable (toList)
 import Data.Monoid ((<>))
@@ -33,6 +33,8 @@ import System.IO (
 
 -- TODO: Handle resizes
 -- TODO: Handle failed terminfo
+-- TODO: Use `withAsync`
+-- TODO: Reset echo and buffering when done
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -281,6 +283,4 @@ readLines = fromInput . _input
 
 -- | Write a line to the console
 writeLine :: RCPL -> Text -> IO ()
-writeLine r txt = do
-    atomically $ send (_output r) txt
-    return ()
+writeLine r txt = void $ atomically $ send (_output r) txt
