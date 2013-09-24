@@ -62,7 +62,7 @@ initialStatus = Status (S.fromList "> ") S.empty 80 24
 
 -- | Events coming into the pure kernel
 data EventIn
-    = Startup ()      -- The first event
+    = Startup         -- The first event
     | Key    Char     -- User typed a key
     | Line   Text     -- Request to print a line to stdout
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
@@ -220,7 +220,7 @@ terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
 rcplCore :: (Monad m) => Terminfo -> Edge (StateT Status m) r EventIn EventOut
 rcplCore t = proc e -> do
     cmd <- case e of
-        Startup u  -> handleStartup -< u
+        Startup    -> handleStartup -< ()
         Key    c   -> handleKey     -< c
         Line   txt -> handleLine    -< txt
         Resize w h -> handleResize  -< (w, h)
@@ -275,7 +275,7 @@ rcpl = do
             TerminalOutput termOutput -> send oTerm      termOutput
             UserInput      txt        -> send oUserInput txt
     a <- async $ (`runStateT` initialStatus) $ runEffect $
-            (yield (Startup ()) >> fromInput iEventIn)
+            (yield Startup >> fromInput iEventIn)
         >-> runEdge (rcplCore t)
         >-> toOutput oEventOut
     link a
