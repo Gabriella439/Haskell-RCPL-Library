@@ -1,4 +1,5 @@
 {-# LANGUAGE Arrows #-}
+
 {-| A read-concurrent-print loop -}
 
 module RCPL (
@@ -35,6 +36,7 @@ import System.IO (
 -- TODO: Handle failed terminfo
 -- TODO: Use `withAsync`
 -- TODO: Reset echo and buffering when done
+-- TODO: Correctly handle `EOT`
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -61,7 +63,8 @@ initialStatus = Status (S.fromList "> ") S.empty 80 24
 
 -- | Events coming into the pure kernel
 data EventIn
-    = Key    Char     -- User typed a key
+    = Startup ()      -- The first event
+    | Key    Char     -- User typed a key
     | Line   Text     -- Request to print a line to stdout
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
 
@@ -71,6 +74,7 @@ data RCPLTerminal
     | AppendChar Char   -- Insert a character at the end of the buffer
     | DeleteChar        -- Remove a character from the end of the buffer
     | DeleteBuffer      -- Remove the entire buffer
+    | AddPrompt
 
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
@@ -118,6 +122,9 @@ handleResize = Edge $ push ~> \(w, h) -> do
     lift $ width  .= w
     lift $ height .= h
 
+handleStartup :: (Monad m) => Edge m r () RCPLCommand
+handleStartup = Edge $ push ~> \() -> yield (PseudoTerminal AddPrompt)
+
 handleLine :: (Monad m) => Edge m r Text RCPLCommand
 handleLine = arr (PseudoTerminal. PrependLine)
 
@@ -142,9 +149,10 @@ handleKey = Edge $ push ~> \c -> case c of
 
 handleEventIn :: (Monad m) => Edge (StateT Status m) r EventIn RCPLCommand
 handleEventIn = proc e -> case e of
-    Key    c   -> handleKey    -< c
-    Line   txt -> handleLine   -< txt
-    Resize w h -> handleResize -< (w, h)
+    Startup u  -> handleStartup -< u
+    Key    c   -> handleKey     -< c
+    Line   txt -> handleLine    -< txt
+    Resize w h -> handleResize  -< (w, h)
 
 terminalDriver
     :: (Monad m) => Edge (StateT Status m) r RCPLTerminal TerminalCommand
@@ -173,13 +181,14 @@ terminalDriver = Edge $ push ~> \cmd -> do
         DeleteChar
             | numChars == 0 && numLines > 0 -> do
                 each [CursorUp, ParmRightCursor (w - 1), EraseChars 1]
-            | len > 0   -> each [CursorLeft, DeleteCharacter]
+            | S.length buf > 0   -> each [CursorLeft, DeleteCharacter]
             | otherwise -> return ()
         DeleteBuffer -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
             yield (InsertString $ toList prm)
+        AddPrompt -> yield (InsertString $ toList prm)
 
 note :: String -> Maybe a -> Either String a
 note str m = case m of
@@ -219,9 +228,10 @@ terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
 rcplCore :: (Monad m) => Terminfo -> Edge (StateT Status m) r EventIn EventOut
 rcplCore t = proc e -> do
     cmd <- case e of
-        Key    c   -> handleKey    -< c
-        Line   txt -> handleLine   -< txt
-        Resize w h -> handleResize -< (w, h)
+        Startup u  -> handleStartup -< u
+        Key    c   -> handleKey     -< c
+        Line   txt -> handleLine    -< txt
+        Resize w h -> handleResize  -< (w, h)
     case cmd of
         PseudoTerminal c -> terminfo t <<< terminalDriver -< c
         FreshLine txt    -> arr UserInput               -< txt
@@ -273,7 +283,9 @@ rcpl = do
             TerminalOutput termOutput -> send oTerm      termOutput
             UserInput      txt        -> send oUserInput txt
     a <- async $ (`runStateT` initialStatus) $ runEffect $
-        fromInput iEventIn >-> runEdge (rcplCore t) >-> toOutput oEventOut
+            (yield (Startup ()) >> fromInput iEventIn)
+        >-> runEdge (rcplCore t)
+        >-> toOutput oEventOut
     link a
     return (RCPL iUserInput oTerminalOutput)
 
