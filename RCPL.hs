@@ -8,6 +8,7 @@ module RCPL (
     rcpl,
     readLines,
     writeLine,
+    changePrompt
     ) where
 
 import Control.Arrow (arr, (<<<))
@@ -36,6 +37,7 @@ import System.IO (
 -- TODO: Use `withAsync`
 -- TODO: Reset echo and buffering when done
 -- TODO: Correctly handle `EOT`
+-- TODO: Move RCPL under another module hierarchy
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -65,15 +67,17 @@ data EventIn
     = Startup         -- The first event
     | Key    Char     -- User typed a key
     | Line   Text     -- Request to print a line to stdout
+    | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
-    = PrependLine Text  -- Insert a line before the input buffer
-    | AppendChar Char   -- Insert a character at the end of the buffer
-    | DeleteChar        -- Remove a character from the end of the buffer
-    | DeleteBuffer      -- Remove the entire buffer
-    | AddPrompt
+    = AddPrompt               -- Print out the initial prompt
+    | PrependLine Text        -- Insert a line before the input buffer
+    | AppendChar Char         -- Insert a character at the end of the buffer
+    | DeleteChar              -- Remove a character from the end of the buffer
+    | DeleteBuffer            -- Remove the entire buffer
+    | ChangePrompt (Seq Char) -- Change the prompt
 
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
@@ -121,12 +125,6 @@ handleResize = Edge $ push ~> \(w, h) -> do
     lift $ width  .= w
     lift $ height .= h
 
-handleStartup :: (Monad m) => Edge m r () RCPLCommand
-handleStartup = Edge $ push ~> \() -> yield (PseudoTerminal AddPrompt)
-
-handleLine :: (Monad m) => Edge m r Text RCPLCommand
-handleLine = arr (PseudoTerminal. PrependLine)
-
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
@@ -145,6 +143,12 @@ handleKey = Edge $ push ~> \c -> case c of
     _    -> do
         yield (PseudoTerminal (AppendChar c))
         lift $ buffer %= (|> c)
+
+handlePrompt :: (Monad m) => Edge (StateT Status m) r Text RCPLCommand
+handlePrompt = Edge $ push ~> \txt -> do
+    let prm' = S.fromList (T.unpack txt)
+    yield (PseudoTerminal (ChangePrompt prm'))
+    prompt .= prm'
 
 terminalDriver
     :: (Monad m) => Edge (StateT Status m) r RCPLTerminal TerminalCommand
@@ -179,8 +183,17 @@ terminalDriver = Edge $ push ~> \cmd -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
+
+            -- Restore the prompt
             yield (InsertString $ toList prm)
         AddPrompt -> yield (InsertString $ toList prm)
+        ChangePrompt prm' -> do
+            -- Delete the prompt and user input
+            each [ParmLeftCursor numChars, ClrEol]
+            replicateM_ numLines $ each [CursorUp, ClrEol]
+
+            -- Print the new prompt and input buffer
+            yield (InsertString $ toList $ prm' <> buf)
 
 note :: String -> Maybe a -> Either String a
 note str m = case m of
@@ -220,10 +233,11 @@ terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
 rcplCore :: (Monad m) => Terminfo -> Edge (StateT Status m) r EventIn EventOut
 rcplCore t = proc e -> do
     cmd <- case e of
-        Startup    -> handleStartup -< ()
-        Key    c   -> handleKey     -< c
-        Line   txt -> handleLine    -< txt
-        Resize w h -> handleResize  -< (w, h)
+        Startup    -> arr (\() -> PseudoTerminal AddPrompt) -< ()
+        Key    c   -> handleKey                             -< c
+        Line   txt -> arr (PseudoTerminal . PrependLine)    -< txt
+        Prompt txt -> handlePrompt                          -< txt
+        Resize w h -> handleResize                          -< (w, h)
     case cmd of
         PseudoTerminal c -> terminfo t <<< terminalDriver -< c
         FreshLine txt    -> arr UserInput               -< txt
@@ -254,8 +268,9 @@ keys = go
 
 -- | A handle to the console
 data RCPL = RCPL
-    { _input  :: Input  Text
-    , _output :: Output Text
+    { _input        :: Input  Text
+    , _writeLine    :: Output Text
+    , _changePrompt :: Output Text
     }
 
 -- | Acquire the console, interacting with it through an 'RCPL' object
@@ -268,9 +283,10 @@ rcpl = do
     Right t <- getTerminfo term
     iKey    <- fromProducer keys
     oTerm   <- fromConsumer $ for cat (lift . T.runTermOutput term)
-    (oUserInput     , iUserInput     ) <- spawn Unbounded
-    (oTerminalOutput, iTerminalOutput) <- spawn Unbounded
-    let iEventIn  = fmap Key iKey <|> fmap Line iTerminalOutput
+    (oUserInput, iUserInput) <- spawn Unbounded
+    (oWrite    , iWrite    ) <- spawn Unbounded
+    (oChange   , iChange   ) <- spawn Unbounded
+    let iEventIn  = fmap Key iKey <|> fmap Line iWrite <|> fmap Prompt iChange
         oEventOut = Output $ \e -> case e of
             TerminalOutput termOutput -> send oTerm      termOutput
             UserInput      txt        -> send oUserInput txt
@@ -279,7 +295,7 @@ rcpl = do
         >-> runEdge (rcplCore t)
         >-> toOutput oEventOut
     link a
-    return (RCPL iUserInput oTerminalOutput)
+    return (RCPL iUserInput oWrite oChange)
 
 -- | Read lines from the console
 readLines :: RCPL -> Producer Text IO ()
@@ -287,4 +303,8 @@ readLines = fromInput . _input
 
 -- | Write a line to the console
 writeLine :: RCPL -> Text -> IO ()
-writeLine r txt = void $ atomically $ send (_output r) txt
+writeLine r txt = void $ atomically $ send (_writeLine r) txt
+
+-- | Change the prompt
+changePrompt :: RCPL -> Text -> IO ()
+changePrompt r txt = void $ atomically $ send (_changePrompt r) txt
