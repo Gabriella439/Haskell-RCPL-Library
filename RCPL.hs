@@ -10,8 +10,8 @@ module RCPL (
     writeLine,
     ) where
 
-import Control.Arrow (arr, (<<<), (>>>))
-import Control.Applicative ((<|>), (<$>), (<*>), pure)
+import Control.Arrow (arr, (<<<))
+import Control.Applicative ((<|>), (<$>), (<*>))
 import Control.Lens hiding ((|>), each)
 import Control.Concurrent.Async (async, link)
 import Control.Monad (replicateM_, unless, when, void)
@@ -26,7 +26,6 @@ import Edge
 import Pipes
 import Pipes.Concurrent
 import Pipes.Core (push)
-import qualified Pipes.Prelude as P
 import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
 import System.IO (
@@ -146,13 +145,6 @@ handleKey = Edge $ push ~> \c -> case c of
     _    -> do
         yield (PseudoTerminal (AppendChar c))
         lift $ buffer %= (|> c)
-
-handleEventIn :: (Monad m) => Edge (StateT Status m) r EventIn RCPLCommand
-handleEventIn = proc e -> case e of
-    Startup u  -> handleStartup -< u
-    Key    c   -> handleKey     -< c
-    Line   txt -> handleLine    -< txt
-    Resize w h -> handleResize  -< (w, h)
 
 terminalDriver
     :: (Monad m) => Edge (StateT Status m) r RCPLTerminal TerminalCommand

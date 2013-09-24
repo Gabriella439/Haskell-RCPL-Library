@@ -36,4 +36,4 @@ Library
         transformers      >= 0.2.0.0 && < 0.4,
         text                            < 0.12
     Exposed-Modules: RCPL Edge
-    GHC-Options: -O2
+    GHC-Options: -O2 -Wall
