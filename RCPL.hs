@@ -1,7 +1,5 @@
 {-# LANGUAGE Arrows #-}
-
-{-| A read-concurrent-print loop
--}
+{-| A read-concurrent-print loop -}
 
 module RCPL (
     -- * Read-concurrent-print loop
@@ -23,16 +21,18 @@ import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Edge
 import Pipes
 import Pipes.Concurrent
 import Pipes.Core (push)
 import qualified Pipes.Prelude as P
-import System.Console.Terminfo (
-    Terminal, setupTermFromEnv, getCapability, tiGetOutput1)
+import qualified System.Console.Terminfo as T
+import System.Console.Terminfo (Terminal, TermOutput)
 import System.IO (
     isEOF, hSetEcho, stdin, stdout, hSetBuffering, BufferMode(NoBuffering) )
+
+-- TODO: Handle resizes
+-- TODO: Handle failed terminfo
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -62,7 +62,6 @@ data EventIn
     = Key    Char     -- User typed a key
     | Line   Text     -- Request to print a line to stdout
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
-    deriving (Read, Show)
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
@@ -70,13 +69,11 @@ data RCPLTerminal
     | AppendChar Char   -- Insert a character at the end of the buffer
     | DeleteChar        -- Remove a character from the end of the buffer
     | DeleteBuffer      -- Remove the entire buffer
-    deriving (Read, Show)
 
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
     = PseudoTerminal RCPLTerminal
     | FreshLine Text
-    deriving (Read, Show)
 
 {-| Low-level description of console interactions
 
@@ -85,7 +82,7 @@ data RCPLCommand
 -}
 data TerminalCommand
     -- Raw textual output
-    = InsertText Text
+    = InsertString String
     | InsertChar Char
 
     -- Control commands
@@ -97,24 +94,22 @@ data TerminalCommand
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
-    deriving (Read, Show)
 
 data Terminfo = Terminfo
-    { clrEol          ::        Text
-    , cursorLeft      ::        Text
-    , cursorUp        ::        Text
-    , deleteCharacter ::        Text
-    , eraseChars      :: Int -> Text
-    , newline         ::        Text
-    , parmLeftCursor  :: Int -> Text
-    , parmRightCursor :: Int -> Text
+    { clrEol          ::        TermOutput
+    , cursorLeft      ::        TermOutput
+    , cursorUp        ::        TermOutput
+    , deleteCharacter ::        TermOutput
+    , eraseChars      :: Int -> TermOutput
+    , newline         ::        TermOutput
+    , parmLeftCursor  :: Int -> TermOutput
+    , parmRightCursor :: Int -> TermOutput
     }
 
 -- | Events leaving the pure kernel
 data EventOut
-    = TerminalOutput Text
+    = TerminalOutput TermOutput
     | UserInput      Text
-    deriving (Read, Show)
 
 handleResize :: (Monad m) => Edge (StateT Status m) r (Int, Int) x
 handleResize = Edge $ push ~> \(w, h) -> do
@@ -165,9 +160,9 @@ terminalDriver = Edge $ push ~> \cmd -> do
             replicateM_ numLines $ each [CursorUp, ClrEol]
 
             -- Print the new output line and the prompt
-            each [ InsertText  txt
+            each [ InsertString (T.unpack txt)
                  , Newline
-                 , InsertText (T.pack $ toList $ bufTotal)
+                 , InsertString (toList bufTotal)
                  ]
             when (numChars == 0 && numLines > 0) $ yield Newline
         AppendChar c -> do
@@ -182,7 +177,7 @@ terminalDriver = Edge $ push ~> \cmd -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
-            yield (InsertText $ T.pack $ toList prm)
+            yield (InsertString $ toList prm)
 
 note :: String -> Maybe a -> Either String a
 note str m = case m of
@@ -190,27 +185,26 @@ note str m = case m of
     Just a  -> Right a
 
 -- TODO: Use `TermOutput` instead of `Text`
-getTerminfo :: IO (Either String Terminfo)
-getTerminfo = do
-    term <- setupTermFromEnv
-    let decode str = fmap T.pack $
-            (getCapability term (tiGetOutput1 str) :: Maybe String)
-        decodeN str = fmap (T.pack .) $
-            (getCapability term (tiGetOutput1 str) :: Maybe (Int -> String))
+getTerminfo :: Terminal -> IO (Either String Terminfo)
+getTerminfo term = do
+    let decode str  = T.getCapability term (T.tiGetOutput1 str)
+            :: Maybe TermOutput
+        decodeN str = T.getCapability term (T.tiGetOutput1 str)
+            :: Maybe (Int -> TermOutput)
     return $ Terminfo
         <$> note "clr_eol"           (decode  "el"  )
         <*> note "cursor_left"       (decode  "cub1")
         <*> note "cursor_up"         (decode  "cuu1")
         <*> note "delete_character"  (decode  "dch1")
         <*> note "erase_chars"       (decodeN "ech" )
-        <*> note "newline"           (pure $ T.pack "\n")
+        <*> note "newline"           (T.getCapability term T.newline)
         <*> note "parm_left_cursor"  (decodeN "cub" )
         <*> note "parm_right_cursor" (decodeN "cuf" )
 
 terminfo :: (Monad m) => Terminfo -> Edge m r TerminalCommand EventOut
 terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
-    InsertText      txt -> txt
-    InsertChar      c   -> T.singleton c
+    InsertString    str -> T.termText str
+    InsertChar      c   -> T.termText [c]
     ClrEol              -> clrEol          t
     CursorLeft          -> cursorLeft      t
     CursorUp            -> cursorUp        t
@@ -266,17 +260,19 @@ rcpl = do
     hSetEcho stdin False
     hSetBuffering stdin NoBuffering
     hSetBuffering stdout NoBuffering
-    iKey  <- fromProducer keys
-    oText <- fromConsumer $ for cat (lift . TIO.putStr)
+    term    <- T.setupTermFromEnv
+    Right t <- getTerminfo term
+    iKey    <- fromProducer keys
+    oTerm   <- fromConsumer $ for cat (lift . T.runTermOutput term)
     (oUserInput     , iUserInput     ) <- spawn Unbounded
     (oTerminalOutput, iTerminalOutput) <- spawn Unbounded
     let iEventIn  = fmap Key iKey <|> fmap Line iTerminalOutput
         oEventOut = Output $ \e -> case e of
-            TerminalOutput txt -> send oText      txt
-            UserInput      txt -> send oUserInput txt
-    Right t <- getTerminfo
+            TerminalOutput termOutput -> send oTerm      termOutput
+            UserInput      txt        -> send oUserInput txt
     a <- async $ (`runStateT` initialStatus) $ runEffect $
         fromInput iEventIn >-> runEdge (rcplCore t) >-> toOutput oEventOut
+    link a
     return (RCPL iUserInput oTerminalOutput)
 
 -- | Read lines from the console
