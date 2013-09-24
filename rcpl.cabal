@@ -26,9 +26,14 @@ Source-Repository head
 
 Library
     Build-Depends:
-        base         >= 4       && < 5   ,
-        pipes        >= 4.0     && < 4.1 ,
-        readline                   < 1.1 ,
-        text                       < 0.12
+        base              >= 4       && < 5  ,
+        async,
+        containers,
+        lens,
+        pipes             >= 4.0     && < 4.1,
+        pipes-concurrency >= 2.0.1   && < 2.1,
+        terminfo,
+        transformers      >= 0.2.0.0 && < 0.4,
+        text                            < 0.12
     Exposed-Modules: RCPL
     GHC-Options: -O2
