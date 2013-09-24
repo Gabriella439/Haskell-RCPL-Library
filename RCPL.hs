@@ -31,7 +31,8 @@ import Pipes.Core (push)
 import qualified Pipes.Prelude as P
 import System.Console.Terminfo (
     Terminal, setupTermFromEnv, getCapability, tiGetOutput1)
-import System.IO (isEOF, hSetEcho, stdin)
+import System.IO (
+    isEOF, hSetEcho, stdin, stdout, hSetBuffering, BufferMode(NoBuffering) )
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -267,6 +268,8 @@ data RCPL = RCPL
 rcpl :: IO RCPL
 rcpl = do
     hSetEcho stdin False
+    hSetBuffering stdin NoBuffering
+    hSetBuffering stdout NoBuffering
     iKey  <- fromProducer keys
     oText <- fromConsumer $ for cat (lift . TIO.putStr)
     (oUserInput     , iUserInput     ) <- spawn Unbounded
