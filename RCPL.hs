@@ -170,6 +170,7 @@ terminalDriver = Edge $ push ~> \cmd -> do
                  , Newline
                  , InsertText (T.pack $ toList $ bufTotal)
                  ]
+            when (numChars == 0 && numLines > 0) $ yield Newline
         AppendChar c -> do
             yield (InsertChar c)
             when (len + 1 == w) $ yield Newline
