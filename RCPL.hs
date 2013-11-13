@@ -1,5 +1,3 @@
-{-# LANGUAGE Arrows #-}
-
 {-| A read-concurrent-print loop -}
 
 module RCPL (
@@ -11,8 +9,8 @@ module RCPL (
     changePrompt
     ) where
 
-import Control.Arrow (arr, (<<<))
 import Control.Applicative ((<|>), (<$>), (<*>))
+import Control.Monad (mzero)
 import Control.Lens hiding ((|>), each)
 import Control.Concurrent.Async (async, link)
 import Control.Monad (replicateM_, unless, when, void)
@@ -23,10 +21,8 @@ import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
-import Edge
 import Pipes
 import Pipes.Concurrent
-import Pipes.Core (push)
 import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
 import System.IO (
@@ -124,18 +120,20 @@ data EventOut
     = TerminalOutput TermOutput
     | UserInput      Text
 
-handleResize :: (Monad m) => Edge (StateT Status m) r (Int, Int) x
-handleResize = Edge $ push ~> \(w, h) -> do
-    lift $ width  .= w
-    lift $ height .= h
+handleResize :: (Monad m) => Int -> Int -> ListT (StateT Status m) r
+handleResize w h = do
+    lift $ do
+        width  .= w
+        height .= h
+    mzero
 
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Modify this to use terminfo to look up the correct backspace key
 -- TODO: Support Home/End/Tab
-handleKey :: (Monad m) => Edge (StateT Status m) r Char RCPLCommand
-handleKey = Edge $ push ~> \c -> case c of
+handleKey :: (Monad m) => Char -> ListT (StateT Status m) RCPLCommand
+handleKey c = Select $ case c of
     '\DEL' -> do
         yield (PseudoTerminal DeleteChar)
         lift $ buffer %= dropEnd 1
@@ -148,15 +146,15 @@ handleKey = Edge $ push ~> \c -> case c of
         yield (PseudoTerminal (AppendChar c))
         lift $ buffer %= (|> c)
 
-handlePrompt :: (Monad m) => Edge (StateT Status m) r Text RCPLCommand
-handlePrompt = Edge $ push ~> \txt -> do
+handlePrompt :: (Monad m) => Text -> ListT (StateT Status m) RCPLCommand
+handlePrompt txt = Select $ do
     let prm' = S.fromList (T.unpack txt)
     yield (PseudoTerminal (ChangePrompt prm'))
     prompt .= prm'
 
 terminalDriver
-    :: (Monad m) => Edge (StateT Status m) r RCPLTerminal TerminalCommand
-terminalDriver = Edge $ push ~> \cmd -> do
+    :: (Monad m) => RCPLTerminal -> ListT (StateT Status m) TerminalCommand
+terminalDriver cmd = Select $ do
     buf <- use buffer
     prm <- use prompt
     w   <- use width
@@ -221,8 +219,8 @@ getTerminfo term = do
         <*> note "parm_left_cursor"  (decodeN "cub" )
         <*> note "parm_right_cursor" (decodeN "cuf" )
 
-terminfo :: (Monad m) => Terminfo -> Edge m r TerminalCommand EventOut
-terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
+terminfo :: Terminfo -> TerminalCommand -> EventOut
+terminfo t cmd = TerminalOutput $ case cmd of
     InsertString    str -> T.termText str
     InsertChar      c   -> T.termText [c]
     ClrEol              -> clrEol          t
@@ -234,17 +232,17 @@ terminfo t = Edge $ push ~> \cmd -> yield $ TerminalOutput $ case cmd of
     ParmLeftCursor  n   -> parmLeftCursor  t n
     ParmRightCursor n   -> parmRightCursor t n
 
-rcplCore :: (Monad m) => Terminfo -> Edge (StateT Status m) r EventIn EventOut
-rcplCore t = proc e -> do
+rcplCore :: (Monad m) => Terminfo -> EventIn -> ListT (StateT Status m) EventOut
+rcplCore t e = do
     cmd <- case e of
-        Startup    -> arr (\() -> PseudoTerminal AddPrompt) -< ()
-        Key    c   -> handleKey                             -< c
-        Line   txt -> arr (PseudoTerminal . PrependLine)    -< txt
-        Prompt txt -> handlePrompt                          -< txt
-        Resize w h -> handleResize                          -< (w, h)
+        Startup    -> return (PseudoTerminal AddPrompt)
+        Key    c   -> handleKey c
+        Line   txt -> return (PseudoTerminal (PrependLine txt))
+        Prompt txt -> handlePrompt txt
+        Resize w h -> handleResize w h
     case cmd of
-        PseudoTerminal c -> terminfo t <<< terminalDriver -< c
-        FreshLine txt    -> arr UserInput               -< txt
+        PseudoTerminal c -> fmap (terminfo t) (terminalDriver c)
+        FreshLine txt    -> return (UserInput txt)
 
 fromProducer :: Producer a IO () -> IO (Input a)
 fromProducer p = do
@@ -296,7 +294,7 @@ rcpl = do
             UserInput      txt        -> send oUserInput txt
     a <- async $ (`runStateT` initialStatus) $ runEffect $
             (yield Startup >> fromInput iEventIn)
-        >-> runEdge (rcplCore t)
+        >-> for cat (\eventIn -> every (rcplCore t eventIn))
         >-> toOutput oEventOut
     link a
     return (RCPL iUserInput oWrite oChange)
