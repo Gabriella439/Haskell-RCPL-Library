@@ -120,13 +120,6 @@ data EventOut
     = TerminalOutput TermOutput
     | UserInput      Text
 
-handleResize :: (Monad m) => Int -> Int -> ListT (StateT Status m) r
-handleResize w h = do
-    lift $ do
-        width  .= w
-        height .= h
-    mzero
-
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
@@ -145,12 +138,6 @@ handleKey c = Select $ case c of
     _    -> do
         yield (PseudoTerminal (AppendChar c))
         lift $ buffer %= (|> c)
-
-handlePrompt :: (Monad m) => Text -> ListT (StateT Status m) RCPLCommand
-handlePrompt txt = Select $ do
-    let prm' = S.fromList (T.unpack txt)
-    yield (PseudoTerminal (ChangePrompt prm'))
-    prompt .= prm'
 
 terminalDriver
     :: (Monad m) => RCPLTerminal -> ListT (StateT Status m) TerminalCommand
@@ -219,8 +206,8 @@ getTerminfo term = do
         <*> note "parm_left_cursor"  (decodeN "cub" )
         <*> note "parm_right_cursor" (decodeN "cuf" )
 
-terminfo :: Terminfo -> TerminalCommand -> EventOut
-terminfo t cmd = TerminalOutput $ case cmd of
+terminfo :: Terminfo -> TerminalCommand -> TermOutput
+terminfo t cmd = case cmd of
     InsertString    str -> T.termText str
     InsertChar      c   -> T.termText [c]
     ClrEol              -> clrEol          t
@@ -238,10 +225,17 @@ rcplCore t e = do
         Startup    -> return (PseudoTerminal AddPrompt)
         Key    c   -> handleKey c
         Line   txt -> return (PseudoTerminal (PrependLine txt))
-        Prompt txt -> handlePrompt txt
-        Resize w h -> handleResize w h
+        Prompt txt -> Select $ do
+            let prm' = S.fromList (T.unpack txt)
+            yield (PseudoTerminal (ChangePrompt prm'))
+            prompt .= prm'
+        Resize w h -> do
+            lift $ do
+                width  .= w
+                height .= h
+            mzero
     case cmd of
-        PseudoTerminal c -> fmap (terminfo t) (terminalDriver c)
+        PseudoTerminal c -> (TerminalOutput . terminfo t) <$> terminalDriver c
         FreshLine txt    -> return (UserInput txt)
 
 fromProducer :: Producer a IO () -> IO (Input a)
