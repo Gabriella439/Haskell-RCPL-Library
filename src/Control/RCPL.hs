@@ -3,16 +3,17 @@
 module Control.RCPL (
     -- * Read-concurrent-print loop
     RCPL,
-    rcpl,
+    withRCPL,
     readLines,
     writeLine,
     changePrompt
     ) where
 
-import Control.Applicative ((<|>), (<$>), (<*>))
+import Control.Applicative ((<|>), (<$>), (<*>), (<*))
+import Control.Exception (bracket)
 import Control.Monad (mzero)
 import Control.Lens hiding ((|>), each)
-import Control.Concurrent.Async (async, link)
+import Control.Concurrent.Async (async, link, withAsync)
 import Control.Monad (replicateM_, unless, when, void)
 import Control.Monad.Trans.State
 import Data.Foldable (toList)
@@ -25,14 +26,11 @@ import Pipes
 import Pipes.Concurrent
 import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
-import System.IO (
-    isEOF, hSetEcho, stdin, stdout, hSetBuffering, BufferMode(NoBuffering) )
+import qualified System.IO as IO
 
 -- TODO: Handle resizes
--- TODO: Use `withAsync`
--- TODO: Reset echo and buffering when done
 -- TODO: Correctly handle `EOT`
--- TODO: Move RCPL under another module hierarchy
+-- TODO: Get this to work on Windows
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -255,7 +253,7 @@ keys :: Producer Char IO ()
 keys = go
   where
     go = do
-        eof <- lift isEOF
+        eof <- lift IO.isEOF
         unless eof $ do
             c <- lift getChar
             yield c
@@ -269,30 +267,40 @@ data RCPL = RCPL
     }
 
 -- | Acquire the console, interacting with it through an 'RCPL' object
-rcpl :: IO RCPL
-rcpl = do
-    hSetEcho stdin False
-    hSetBuffering stdin NoBuffering
-    hSetBuffering stdout NoBuffering
-    term    <- T.setupTermFromEnv
-    t <- case getTerminfo term of
-        Left  str -> ioError (userError str)
-        Right t   -> return t
-    iKey    <- fromProducer keys
-    oTerm   <- fromConsumer $ for cat (lift . T.runTermOutput term)
-    (oUserInput, iUserInput) <- spawn Unbounded
-    (oWrite    , iWrite    ) <- spawn Unbounded
-    (oChange   , iChange   ) <- spawn Unbounded
-    let iEventIn  = fmap Key iKey <|> fmap Line iWrite <|> fmap Prompt iChange
-        oEventOut = Output $ \e -> case e of
-            TerminalOutput termOutput -> send oTerm      termOutput
-            UserInput      txt        -> send oUserInput txt
-    a <- async $ (`runStateT` initialStatus) $ runEffect $
-            (yield Startup >> fromInput iEventIn)
-        >-> for cat (\eventIn -> every (rcplCore t eventIn))
-        >-> toOutput oEventOut
-    link a
-    return (RCPL iUserInput oWrite oChange)
+withRCPL :: (RCPL -> IO a) -> IO a
+withRCPL k = 
+    bracket setIn   restoreIn   $ \_ -> do
+    bracket setOut  restoreOut  $ \_ -> do
+    bracket setEcho restoreEcho $ \_ -> do
+        term <- T.setupTermFromEnv
+        t <- case getTerminfo term of
+            Left  str -> ioError (userError str)
+            Right t   -> return t
+        iKey <- fromProducer keys
+        oTerm <- fromConsumer $ for cat (lift . T.runTermOutput term)
+        (oUserInput, iUserInput) <- spawn Unbounded
+        (oWrite    , iWrite    ) <- spawn Unbounded
+        (oChange   , iChange   ) <- spawn Unbounded
+        let iEventIn  =
+                fmap Key iKey <|> fmap Line iWrite <|> fmap Prompt iChange
+            oEventOut = Output $ \e -> case e of
+                TerminalOutput termOutput -> send oTerm      termOutput
+                UserInput      txt        -> send oUserInput txt
+            io = (`runStateT` initialStatus) $ runEffect $
+                    (yield Startup >> fromInput iEventIn)
+                >-> for cat (\eventIn -> every (rcplCore t eventIn))
+                >-> toOutput oEventOut
+        withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
+  where
+    setIn   =
+        IO.hGetBuffering IO.stdin  <* IO.hSetBuffering IO.stdin  IO.NoBuffering
+    setOut  =
+        IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
+    setEcho =
+        IO.hGetEcho      IO.stdin  <* IO.hSetEcho      IO.stdin  False
+    restoreIn   i = IO.hSetBuffering IO.stdin  i
+    restoreOut  o = IO.hSetBuffering IO.stdout o
+    restoreEcho e = IO.hSetEcho      IO.stdin  e
 
 -- | Read lines from the console
 readLines :: RCPL -> Producer Text IO ()
