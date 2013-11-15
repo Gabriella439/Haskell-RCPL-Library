@@ -190,21 +190,21 @@ note str m = case m of
     Just a  -> Right a
 
 -- TODO: Use `TermOutput` instead of `Text`
-getTerminfo :: Terminal -> IO (Either String Terminfo)
-getTerminfo term = do
+getTerminfo :: Terminal -> Either String Terminfo
+getTerminfo term =
     let decode str  = T.getCapability term (T.tiGetOutput1 str)
             :: Maybe TermOutput
         decodeN str = T.getCapability term (T.tiGetOutput1 str)
             :: Maybe (Int -> TermOutput)
-    return $ Terminfo
-        <$> note "clr_eol"           (decode  "el"  )
-        <*> note "cursor_left"       (decode  "cub1")
-        <*> note "cursor_up"         (decode  "cuu1")
-        <*> note "delete_character"  (decode  "dch1")
-        <*> note "erase_chars"       (decodeN "ech" )
-        <*> note "newline"           (T.getCapability term T.newline)
-        <*> note "parm_left_cursor"  (decodeN "cub" )
-        <*> note "parm_right_cursor" (decodeN "cuf" )
+    in  Terminfo
+            <$> note "clr_eol"           (decode  "el"  )
+            <*> note "cursor_left"       (decode  "cub1")
+            <*> note "cursor_up"         (decode  "cuu1")
+            <*> note "delete_character"  (decode  "dch1")
+            <*> note "erase_chars"       (decodeN "ech" )
+            <*> note "newline"           (T.getCapability term T.newline)
+            <*> note "parm_left_cursor"  (decodeN "cub" )
+            <*> note "parm_right_cursor" (decodeN "cuf" )
 
 terminfo :: Terminfo -> TerminalCommand -> TermOutput
 terminfo t cmd = case cmd of
@@ -276,7 +276,7 @@ rcpl = do
     hSetBuffering stdin NoBuffering
     hSetBuffering stdout NoBuffering
     term    <- T.setupTermFromEnv
-    Right t <- getTerminfo term
+    let Right t = getTerminfo term
     iKey    <- fromProducer keys
     oTerm   <- fromConsumer $ for cat (lift . T.runTermOutput term)
     (oUserInput, iUserInput) <- spawn Unbounded
