@@ -25,6 +25,7 @@ Source-Repository head
     Location: https://github.com/Gabriel439/Haskell-RCPL-Library
 
 Library
+    Hs-Source-Dirs: src
     Build-Depends:
         base              >= 4       && < 5  ,
         async,
@@ -35,5 +36,5 @@ Library
         terminfo,
         transformers      >= 0.2.0.0 && < 0.4,
         text                            < 0.12
-    Exposed-Modules: RCPL
+    Exposed-Modules: Control.RCPL
     GHC-Options: -O2 -Wall

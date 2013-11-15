@@ -1,6 +1,6 @@
 {-| A read-concurrent-print loop -}
 
-module RCPL (
+module Control.RCPL (
     -- * Read-concurrent-print loop
     RCPL,
     rcpl,
