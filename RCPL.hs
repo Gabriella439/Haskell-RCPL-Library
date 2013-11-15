@@ -29,7 +29,6 @@ import System.IO (
     isEOF, hSetEcho, stdin, stdout, hSetBuffering, BufferMode(NoBuffering) )
 
 -- TODO: Handle resizes
--- TODO: Handle failed terminfo
 -- TODO: Use `withAsync`
 -- TODO: Reset echo and buffering when done
 -- TODO: Correctly handle `EOT`
@@ -276,7 +275,9 @@ rcpl = do
     hSetBuffering stdin NoBuffering
     hSetBuffering stdout NoBuffering
     term    <- T.setupTermFromEnv
-    let Right t = getTerminfo term
+    t <- case getTerminfo term of
+        Left  str -> ioError (userError str)
+        Right t   -> return t
     iKey    <- fromProducer keys
     oTerm   <- fromConsumer $ for cat (lift . T.runTermOutput term)
     (oUserInput, iUserInput) <- spawn Unbounded
