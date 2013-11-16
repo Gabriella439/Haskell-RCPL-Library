@@ -96,7 +96,6 @@ data TerminalCommand
     | CursorLeft
     | CursorUp
     | DeleteCharacter
-    | EraseChars Int
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
@@ -114,7 +113,6 @@ data Terminfo = Terminfo
     , cursorLeft      ::        TermOutput
     , cursorUp        ::        TermOutput
     , deleteCharacter ::        TermOutput
-    , eraseChars      :: Int -> TermOutput
     , newline         ::        TermOutput
     , parmLeftCursor  :: Int -> TermOutput
     , parmRightCursor :: Int -> TermOutput
@@ -168,7 +166,7 @@ terminalDriver cmd = Select $ do
             when (len + 1 == w) $ yield Newline
         DeleteChar
             | numChars == 0 && numLines > 0 -> do
-                each [CursorUp, ParmRightCursor (w - 1), EraseChars 1]
+                each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
             | S.length buf > 0   -> each [CursorLeft, DeleteCharacter]
             | otherwise -> return ()
         DeleteBuffer -> do
@@ -206,7 +204,6 @@ getTerminfo term =
             <*> note "cursor_left"       (decode  "cub1")
             <*> note "cursor_up"         (decode  "cuu1")
             <*> note "delete_character"  (decode  "dch1")
-            <*> note "erase_chars"       (decodeN "ech" )
             <*> note "newline"           (T.getCapability term T.newline)
             <*> note "parm_left_cursor"  (decodeN "cub" )
             <*> note "parm_right_cursor" (decodeN "cuf" )
@@ -220,7 +217,6 @@ terminfo t cmd = case cmd of
     CursorLeft          -> cursorLeft      t
     CursorUp            -> cursorUp        t
     DeleteCharacter     -> deleteCharacter t
-    EraseChars      n   -> eraseChars      t n
     Newline             -> newline         t
     ParmLeftCursor  n   -> parmLeftCursor  t n
     ParmRightCursor n   -> parmRightCursor t n
