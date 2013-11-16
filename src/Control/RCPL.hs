@@ -11,11 +11,11 @@ module Control.RCPL (
 
 import Control.Applicative ((<|>), (<$>), (<*>), (<*))
 import Control.Exception (bracket)
-import Control.Monad (mzero)
-import Control.Monad.Morph (hoist)
+import Control.Monad (liftM, mzero)
 import Control.Lens hiding ((|>), each)
 import Control.Concurrent.Async (async, link, withAsync)
 import Control.Monad (replicateM_, unless, when, void)
+import Control.Monad.Trans.Reader (ReaderT(ReaderT), Reader)
 import Control.Monad.Trans.State
 import Data.Foldable (toList)
 import Data.Functor.Identity (runIdentity)
@@ -126,17 +126,20 @@ data Terminfo = Terminfo
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
+readOnly :: (Monad m) => ReaderT s m a -> StateT s m a
+readOnly (ReaderT k) = StateT (\s -> liftM (\a -> (a, s)) (k s))
+
 -- TODO: Support Home/End/Tab
-handleKey :: Char -> ListT (State Status) RCPLCommand
+handleKey :: Char -> ListT (Reader Status) RCPLCommand
 handleKey c = Select $ case c of
     '\DEL' -> yield (PseudoTerminal DeleteChar)
 
     '\n'   -> do
-        buf <- use buffer
+        buf <- lift (view buffer)
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
     '\EOT' -> do
-        buf <- use buffer
+        buf <- lift (view buffer)
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
 
@@ -239,7 +242,7 @@ rcplCore :: Terminfo -> EventIn -> ListT (State Status) EventOut
 rcplCore t e = do
     cmd <- case e of
         Startup    -> return (PseudoTerminal AddPrompt)
-        Key    c   -> handleKey c
+        Key    c   -> hoist readOnly (handleKey c)
         Line   txt -> return (PseudoTerminal (PrependLine txt))
         Prompt txt -> Select $ do
             let prm' = S.fromList (T.unpack txt)
