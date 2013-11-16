@@ -12,11 +12,13 @@ module Control.RCPL (
 import Control.Applicative ((<|>), (<$>), (<*>), (<*))
 import Control.Exception (bracket)
 import Control.Monad (mzero)
+import Control.Monad.Morph (hoist)
 import Control.Lens hiding ((|>), each)
 import Control.Concurrent.Async (async, link, withAsync)
 import Control.Monad (replicateM_, unless, when, void)
 import Control.Monad.Trans.State
 import Data.Foldable (toList)
+import Data.Functor.Identity (runIdentity)
 import Data.Monoid ((<>))
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
@@ -31,6 +33,8 @@ import qualified System.IO as IO
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
 -- TODO: Get this to work on Windows
+-- TODO: Try to reuse more things from `terminfo`
+-- TODO: Tighten dependency ranges
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -123,25 +127,22 @@ dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Support Home/End/Tab
-handleKey :: (Monad m) => Char -> ListT (StateT Status m) RCPLCommand
+handleKey :: Char -> ListT (State Status) RCPLCommand
 handleKey c = Select $ case c of
-    '\DEL' -> do
-        yield (PseudoTerminal DeleteChar)
-        lift $ buffer %= dropEnd 1
+    '\DEL' -> yield (PseudoTerminal DeleteChar)
+
     '\n'   -> do
         buf <- use buffer
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
-        lift $ buffer .= S.empty
+
     '\EOT' -> do
         buf <- use buffer
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
-    _    -> do
-        yield (PseudoTerminal (AppendChar c))
-        lift $ buffer %= (|> c)
 
-terminalDriver
-    :: (Monad m) => RCPLTerminal -> ListT (StateT Status m) TerminalCommand
+    _      -> yield (PseudoTerminal (AppendChar c))
+
+terminalDriver :: RCPLTerminal -> ListT (State Status) TerminalCommand
 terminalDriver cmd = Select $ do
     buf <- use buffer
     prm <- use prompt
@@ -161,14 +162,21 @@ terminalDriver cmd = Select $ do
                  , InsertString (toList bufTotal)
                  ]
             when (numChars == 0 && numLines > 0) $ yield Newline
+
         AppendChar c -> do
             yield (InsertChar c)
             when (len + 1 == w) $ yield Newline
-        DeleteChar
-            | numChars == 0 && numLines > 0 -> do
-                each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
-            | S.length buf > 0   -> each [CursorLeft, DeleteCharacter]
-            | otherwise -> return ()
+            lift $ buffer %= (|> c)
+
+        DeleteChar -> do
+            let m | numChars == 0 && numLines > 0 =
+                      each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
+                  | S.length buf > 0 = each [CursorLeft, DeleteCharacter]
+                  | otherwise = return ()
+            m
+
+            lift $ buffer %= dropEnd 1
+
         DeleteBuffer -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
@@ -176,10 +184,15 @@ terminalDriver cmd = Select $ do
 
             -- Restore the prompt
             yield (InsertString $ toList prm)
+
+            lift $ buffer .= S.empty
+
         AddPrompt    -> yield (InsertString $ toList prm)
+
         DeletePrompt -> do
             let prmLen = S.length prm
             each [ParmLeftCursor prmLen, ParmDch prmLen]
+
         ChangePrompt prm' -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
@@ -222,7 +235,7 @@ terminfo t cmd = case cmd of
     ParmRightCursor n   -> parmRightCursor t n
     ParmDch         n   -> parmDch         t n
 
-rcplCore :: (Monad m) => Terminfo -> EventIn -> ListT (StateT Status m) EventOut
+rcplCore :: Terminfo -> EventIn -> ListT (State Status) EventOut
 rcplCore t e = do
     cmd <- case e of
         Startup    -> return (PseudoTerminal AddPrompt)
@@ -286,7 +299,6 @@ withRCPL k =
         iKey <- fromProducer keys
         oTerm <- fromConsumer $ for cat (lift . T.runTermOutput term)
         (oUserInput, iUserInput, dUserInput) <- spawn' Unbounded
---      (oUserInput, iUserInput            ) <- spawn Unbounded
         (oWrite    , iWrite                ) <- spawn Unbounded
         (oChange   , iChange               ) <- spawn Unbounded
         (oDone     , iDone                 ) <- spawn Single
@@ -295,15 +307,21 @@ withRCPL k =
                 <|> fmap (Right . Line  ) iWrite
                 <|> fmap (Right . Prompt) iChange
                 <|> fmap  Left            iDone
+
             oEventOut = Output $ \e -> case e of
                 TerminalOutput termOutput -> send oTerm      termOutput
                 UserInput      txt        -> send oUserInput txt
                 Done                      -> send oDone      ()
+
+            generalize = return . runIdentity
+
+            eventOut e = hoist (hoist generalize) (rcplCore t e)
+
             io = do
                 flip evalStateT initialStatus $ runEffect $
                         (yield (Right Startup) >> fromInput iEventIn)
                     >-> rights
-                    >-> for cat (\eventIn -> every (rcplCore t eventIn))
+                    >-> for cat (every . eventOut)
                     >-> toOutput oEventOut
                 atomically dUserInput
         withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
