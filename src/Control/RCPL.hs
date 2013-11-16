@@ -28,6 +28,7 @@ import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
 import qualified System.IO as IO
 
+-- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
 -- TODO: Get this to work on Windows
 
@@ -95,11 +96,11 @@ data TerminalCommand
     | CursorLeft
     | CursorUp
     | DeleteCharacter
-      -- TODO: Do I need this to be parametrized?
     | EraseChars Int
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
+    | ParmDch Int
     deriving (Eq, Show)
 
 -- | Events leaving the pure kernel
@@ -117,6 +118,7 @@ data Terminfo = Terminfo
     , newline         ::        TermOutput
     , parmLeftCursor  :: Int -> TermOutput
     , parmRightCursor :: Int -> TermOutput
+    , parmDch         :: Int -> TermOutput
     }
 
 dropEnd :: Int -> Seq a -> Seq a
@@ -177,8 +179,9 @@ terminalDriver cmd = Select $ do
             -- Restore the prompt
             yield (InsertString $ toList prm)
         AddPrompt    -> yield (InsertString $ toList prm)
-        -- TODO: Could probably improve DeletePrompt
-        DeletePrompt -> each ([1..S.length prm] >> [CursorLeft, DeleteCharacter])
+        DeletePrompt -> do
+            let prmLen = S.length prm
+            each [ParmLeftCursor prmLen, ParmDch prmLen]
         ChangePrompt prm' -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
@@ -192,7 +195,6 @@ note str m = case m of
     Nothing -> Left  ("getTerminfo: " ++ str ++ " does not exist")
     Just a  -> Right a
 
--- TODO: Use `TermOutput` instead of `Text`
 getTerminfo :: Terminal -> Either String Terminfo
 getTerminfo term =
     let decode str  = T.getCapability term (T.tiGetOutput1 str)
@@ -208,6 +210,7 @@ getTerminfo term =
             <*> note "newline"           (T.getCapability term T.newline)
             <*> note "parm_left_cursor"  (decodeN "cub" )
             <*> note "parm_right_cursor" (decodeN "cuf" )
+            <*> note "parm_dch"          (decodeN "dch" )
 
 terminfo :: Terminfo -> TerminalCommand -> TermOutput
 terminfo t cmd = case cmd of
@@ -221,6 +224,7 @@ terminfo t cmd = case cmd of
     Newline             -> newline         t
     ParmLeftCursor  n   -> parmLeftCursor  t n
     ParmRightCursor n   -> parmRightCursor t n
+    ParmDch         n   -> parmDch         t n
 
 rcplCore :: (Monad m) => Terminfo -> EventIn -> ListT (StateT Status m) EventOut
 rcplCore t e = do
