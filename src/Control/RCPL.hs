@@ -29,7 +29,6 @@ import System.Console.Terminfo (Terminal, TermOutput)
 import qualified System.IO as IO
 
 -- TODO: Handle resizes
--- TODO: Correctly handle `EOT`
 -- TODO: Get this to work on Windows
 
 data Status = Status
@@ -51,7 +50,6 @@ height f (Status p b w h) = fmap (\h' -> Status p b w h') (f h)
 prompt :: Lens' Status (Seq Char)
 prompt f (Status p b w h) = fmap (\p' -> Status p' b w h) (f p) 
 
--- TODO: Add prompt
 initialStatus :: Status
 initialStatus = Status (S.fromList "> ") S.empty 80 24
 
@@ -67,6 +65,7 @@ data EventIn
 -- | High-level representation of terminal interactions
 data RCPLTerminal
     = AddPrompt               -- Print out the initial prompt
+    | DeletePrompt            -- Remove the prompt
     | PrependLine Text        -- Insert a line before the input buffer
     | AppendChar Char         -- Insert a character at the end of the buffer
     | DeleteChar              -- Remove a character from the end of the buffer
@@ -77,6 +76,7 @@ data RCPLTerminal
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
     = PseudoTerminal RCPLTerminal
+    | EndOfTransmission
     | FreshLine Text
     deriving (Eq, Show)
 
@@ -95,11 +95,18 @@ data TerminalCommand
     | CursorLeft
     | CursorUp
     | DeleteCharacter
+      -- TODO: Do I need this to be parametrized?
     | EraseChars Int
     | Newline
     | ParmLeftCursor Int
     | ParmRightCursor Int
     deriving (Eq, Show)
+
+-- | Events leaving the pure kernel
+data EventOut
+    = TerminalOutput TermOutput
+    | UserInput      Text
+    | Done
 
 data Terminfo = Terminfo
     { clrEol          ::        TermOutput
@@ -112,26 +119,23 @@ data Terminfo = Terminfo
     , parmRightCursor :: Int -> TermOutput
     }
 
--- | Events leaving the pure kernel
-data EventOut
-    = TerminalOutput TermOutput
-    | UserInput      Text
-
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
--- TODO: Modify this to use terminfo to look up the correct backspace key
 -- TODO: Support Home/End/Tab
 handleKey :: (Monad m) => Char -> ListT (StateT Status m) RCPLCommand
 handleKey c = Select $ case c of
     '\DEL' -> do
         yield (PseudoTerminal DeleteChar)
         lift $ buffer %= dropEnd 1
-    '\n' -> do
+    '\n'   -> do
         buf <- use buffer
-        yield (FreshLine $ T.pack $ toList buf)
-        yield (PseudoTerminal DeleteBuffer)
+        each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
         lift $ buffer .= S.empty
+    '\EOT' -> do
+        buf <- use buffer
+        when (S.length buf == 0) $
+            each [PseudoTerminal DeletePrompt, EndOfTransmission]
     _    -> do
         yield (PseudoTerminal (AppendChar c))
         lift $ buffer %= (|> c)
@@ -172,7 +176,9 @@ terminalDriver cmd = Select $ do
 
             -- Restore the prompt
             yield (InsertString $ toList prm)
-        AddPrompt -> yield (InsertString $ toList prm)
+        AddPrompt    -> yield (InsertString $ toList prm)
+        -- TODO: Could probably improve DeletePrompt
+        DeletePrompt -> each ([1..S.length prm] >> [CursorLeft, DeleteCharacter])
         ChangePrompt prm' -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
@@ -232,8 +238,9 @@ rcplCore t e = do
                 height .= h
             mzero
     case cmd of
-        PseudoTerminal c -> (TerminalOutput . terminfo t) <$> terminalDriver c
-        FreshLine txt    -> return (UserInput txt)
+        PseudoTerminal c  -> (TerminalOutput . terminfo t) <$> terminalDriver c
+        EndOfTransmission -> return Done
+        FreshLine txt     -> return (UserInput txt)
 
 fromProducer :: Producer a IO () -> IO (Input a)
 fromProducer p = do
@@ -278,29 +285,45 @@ withRCPL k =
             Right t   -> return t
         iKey <- fromProducer keys
         oTerm <- fromConsumer $ for cat (lift . T.runTermOutput term)
-        (oUserInput, iUserInput) <- spawn Unbounded
-        (oWrite    , iWrite    ) <- spawn Unbounded
-        (oChange   , iChange   ) <- spawn Unbounded
+        (oUserInput, iUserInput, dUserInput) <- spawn' Unbounded
+--      (oUserInput, iUserInput            ) <- spawn Unbounded
+        (oWrite    , iWrite                ) <- spawn Unbounded
+        (oChange   , iChange               ) <- spawn Unbounded
+        (oDone     , iDone                 ) <- spawn Single
         let iEventIn  =
-                fmap Key iKey <|> fmap Line iWrite <|> fmap Prompt iChange
+                    fmap (Right . Key   ) iKey
+                <|> fmap (Right . Line  ) iWrite
+                <|> fmap (Right . Prompt) iChange
+                <|> fmap  Left            iDone
             oEventOut = Output $ \e -> case e of
                 TerminalOutput termOutput -> send oTerm      termOutput
                 UserInput      txt        -> send oUserInput txt
-            io = (`runStateT` initialStatus) $ runEffect $
-                    (yield Startup >> fromInput iEventIn)
-                >-> for cat (\eventIn -> every (rcplCore t eventIn))
-                >-> toOutput oEventOut
+                Done                      -> send oDone      ()
+            io = do
+                flip evalStateT initialStatus $ runEffect $
+                        (yield (Right Startup) >> fromInput iEventIn)
+                    >-> rights
+                    >-> for cat (\eventIn -> every (rcplCore t eventIn))
+                    >-> toOutput oEventOut
+                atomically dUserInput
         withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
   where
+    rights = do
+        e <- await
+        case e of
+            Left  _ -> return ()
+            Right r -> do
+                yield r
+                rights
     setIn   =
         IO.hGetBuffering IO.stdin  <* IO.hSetBuffering IO.stdin  IO.NoBuffering
     setOut  =
         IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
     setEcho =
         IO.hGetEcho      IO.stdin  <* IO.hSetEcho      IO.stdin  False
-    restoreIn   i = IO.hSetBuffering IO.stdin  i
-    restoreOut  o = IO.hSetBuffering IO.stdout o
-    restoreEcho e = IO.hSetEcho      IO.stdin  e
+    restoreIn   _i = return ()  -- IO.hSetBuffering IO.stdin  i
+    restoreOut   o = IO.hSetBuffering IO.stdout o
+    restoreEcho _e = return ()  -- IO.hSetEcho      IO.stdin  e
 
 -- | Read lines from the console
 readLines :: RCPL -> Producer Text IO ()
