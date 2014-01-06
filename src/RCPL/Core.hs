@@ -14,6 +14,7 @@ module RCPL.Core (
     , rcplModel
 
     -- * Partial getters
+    -- $partial
     , _TerminalOutput
     , _UserInput
     , _Done
@@ -66,8 +67,8 @@ data EventOut
     | Done
 
 {- $logic
-    All of these functions are pure and can be tested using @QuickCheck@ and
-    also permit deterministic replays for debugging and testing purposes
+    All of these functions are pure, meaning that they can be tested using
+    @QuickCheck@, reused in other contexts, and replayed deterministically
 
     The key function is 'rcplModel', which bundles the pure business logic of
     the library using a 'Model' from the @mvc@ library
@@ -186,6 +187,11 @@ rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
                 fmap (TerminalOutput . translate) (terminalDriver c)
             EndOfTransmission -> return  Done
             FreshLine txt     -> return (UserInput txt)
+
+{- $partial
+    These are for use in conjunction with the 'handles' function from the @mvc@
+    library, in order to avoid a @lens@ dependency
+-}
 
 -- | Raw terminal instructions
 _TerminalOutput :: EventOut -> Maybe TermOutput

@@ -6,6 +6,7 @@ module RCPL.Status (
     , initialStatus
 
     -- * Lenses
+    -- $lenses
     , buffer
     , width
     , height
@@ -35,6 +36,11 @@ data Status = Status
 -}
 initialStatus :: Status
 initialStatus = Status (fromList "> ") empty 80 24
+
+{- $lenses
+    @(Functor f => LensLike f a b)@ is the same thing as @(Lens' a b)@, but
+    permits a smaller @lens-family-core@ dependency
+-}
     
 -- | The prompt
 prompt :: (Functor f) => LensLike' f Status (Seq Char)
