@@ -34,8 +34,8 @@ import qualified Data.Text as T
 import MVC
 import qualified System.IO as IO
 
-import RCPL.Status
-import RCPL.Terminal
+import RCPL.Status (Status(..), initialStatus, prompt, buffer, height, width)
+import RCPL.Terminal (TerminalCommand(..), TermOutput, setupTerminal)
 
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
