@@ -1,6 +1,6 @@
 {-| A read-concurrent-print loop -}
 
-module Control.RCPL (
+module RCPL (
     -- * The console
       RCPL
     , rcpl

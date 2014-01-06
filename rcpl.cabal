@@ -38,5 +38,5 @@ Library
         terminfo,
         transformers      >= 0.2.0.0 && < 0.4,
         text                            < 0.12
-    Exposed-Modules: Control.RCPL
+    Exposed-Modules: RCPL
     GHC-Options: -O2 -Wall
