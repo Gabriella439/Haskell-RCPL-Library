@@ -41,6 +41,7 @@ Library
         text                            < 0.12
     Exposed-Modules:
           RCPL
+        , RCPL.Core
         , RCPL.Status
         , RCPL.Terminal
     GHC-Options: -O2 -Wall
