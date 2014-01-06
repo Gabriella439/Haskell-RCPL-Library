@@ -1,14 +1,22 @@
 {-| A read-concurrent-print loop -}
 
 module Control.RCPL (
-    -- * Read-concurrent-print loop
-    RCPL,
-    rcpl,
-    readLine,
-    readLines,
-    writeLine,
-    writeLines,
-    changePrompt
+    -- * The console
+      RCPL
+    , rcpl
+    , with
+
+    -- * Commands
+    -- $commands
+    , readLine
+    , writeLine
+    , changePrompt
+
+    -- * Pipe utilities
+    -- $pipes
+    , readLines
+    , writeLines
+
     ) where
 
 import Control.Applicative ((<*>), (<*), (*>))
@@ -359,22 +367,30 @@ rcpl = manage $ \k ->
     
         withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
 
+{- $commands
+    These commands will fail and return 'Nothing' \/ 'False' if the console has
+    terminated
+-}
 -- | Read a line from the console
 readLine :: RCPL -> IO (Maybe Text)
 readLine = atomically . recv . _readLine
-
--- | Read lines from the console
-readLines :: RCPL -> Producer Text IO ()
-readLines = fromInput . _readLine
 
 -- | Write a line to the console
 writeLine :: RCPL -> Text -> IO Bool
 writeLine = send . _writeLine
 
--- | Write lines to the console
-writeLines :: RCPL -> Consumer Text IO ()
-writeLines = toOutput . _writeLine
-
 -- | Change the prompt
 changePrompt :: RCPL -> Text -> IO Bool
 changePrompt = send . _changePrompt
+
+{- $pipes
+    These pipes terminate when the console terminates
+-}
+
+-- | Read lines from the console
+readLines :: RCPL -> Producer Text IO ()
+readLines = fromInput . _readLine
+
+-- | Write lines to the console
+writeLines :: RCPL -> Consumer Text IO ()
+writeLines = toOutput . _writeLine
