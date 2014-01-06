@@ -3,29 +3,26 @@
 module Control.RCPL (
     -- * Read-concurrent-print loop
     RCPL,
-    withRCPL,
+    rcpl,
+    readLine,
     readLines,
     writeLine,
+    writeLines,
     changePrompt
     ) where
 
-import Control.Applicative ((<|>), (<$>), (<*>), (<*))
+import Control.Applicative ((<*>), (<*), (*>))
 import Control.Exception (bracket)
-import Control.Monad (liftM, mzero)
+import Control.Monad (mzero)
 import Control.Lens hiding ((|>), each)
-import Control.Concurrent.Async (async, link, withAsync)
-import Control.Monad (replicateM_, unless, when, void)
-import Control.Monad.Trans.Reader (ReaderT(ReaderT), Reader)
-import Control.Monad.Trans.State
+import Control.Concurrent.Async (withAsync)
+import Control.Monad (replicateM_, unless, when)
 import Data.Foldable (toList)
-import Data.Functor.Identity (runIdentity)
-import Data.Monoid ((<>))
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
-import Pipes
-import Pipes.Concurrent
+import MVC
 import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
 import qualified System.IO as IO
@@ -35,6 +32,7 @@ import qualified System.IO as IO
 -- TODO: Get this to work on Windows
 -- TODO: Try to reuse more things from `terminfo`
 -- TODO: Tighten dependency ranges
+-- TODO: Switch to `lens-family`
 
 data Status = Status
     { _prompt       :: Seq Char  -- The prompt
@@ -55,9 +53,6 @@ height f (Status p b w h) = fmap (\h' -> Status p b w h') (f h)
 prompt :: Lens' Status (Seq Char)
 prompt f (Status p b w h) = fmap (\p' -> Status p' b w h) (f p) 
 
-initialStatus :: Status
-initialStatus = Status (S.fromList "> ") S.empty 80 24
-
 -- | Events coming into the pure kernel
 data EventIn
     = Startup         -- The first event
@@ -69,8 +64,8 @@ data EventIn
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
-    = AddPrompt               -- Print out the initial prompt
-    | DeletePrompt            -- Remove the prompt
+    = AddPrompt               -- Print the prompt
+    | DeletePrompt            -- Clear the prompt
     | PrependLine Text        -- Insert a line before the input buffer
     | AppendChar Char         -- Insert a character at the end of the buffer
     | DeleteChar              -- Remove a character from the end of the buffer
@@ -81,8 +76,8 @@ data RCPLTerminal
 -- | Output coming out of the 'handleEventIn' stage
 data RCPLCommand
     = PseudoTerminal RCPLTerminal
-    | EndOfTransmission
     | FreshLine Text
+    | EndOfTransmission
     deriving (Eq, Show)
 
 {-| Low-level description of console interactions
@@ -112,6 +107,21 @@ data EventOut
     | UserInput      Text
     | Done
 
+_TerminalOutput :: Prism' EventOut TermOutput
+_TerminalOutput = prism' TerminalOutput $ \x -> case x of
+    TerminalOutput y -> Just y
+    _                -> Nothing
+
+_UserInput :: Prism' EventOut Text
+_UserInput = prism' UserInput $ \x -> case x of
+    UserInput y -> Just y
+    _           -> Nothing
+
+_Done :: Prism' EventOut ()
+_Done = prism' (\_ -> Done) $ \x -> case x of
+    Done -> Just ()
+    _    -> Nothing
+
 data Terminfo = Terminfo
     { clrEol          ::        TermOutput
     , cursorLeft      ::        TermOutput
@@ -125,9 +135,6 @@ data Terminfo = Terminfo
 
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
-
-readOnly :: (Monad m) => ReaderT s m a -> StateT s m a
-readOnly (ReaderT k) = StateT (\s -> liftM (\a -> (a, s)) (k s))
 
 -- TODO: Support Home/End/Tab
 handleKey :: Char -> ListT (Reader Status) RCPLCommand
@@ -238,42 +245,63 @@ terminfo t cmd = case cmd of
     ParmRightCursor n   -> parmRightCursor t n
     ParmDch         n   -> parmDch         t n
 
-rcplCore :: Terminfo -> EventIn -> ListT (State Status) EventOut
-rcplCore t e = do
-    cmd <- case e of
-        Startup    -> return (PseudoTerminal AddPrompt)
-        Key    c   -> hoist readOnly (handleKey c)
-        Line   txt -> return (PseudoTerminal (PrependLine txt))
-        Prompt txt -> Select $ do
-            let prm' = S.fromList (T.unpack txt)
-            yield (PseudoTerminal (ChangePrompt prm'))
-            prompt .= prm'
-        Resize w h -> do
-            lift $ do
-                width  .= w
-                height .= h
-            mzero
-    case cmd of
-        PseudoTerminal c  -> (TerminalOutput . terminfo t) <$> terminalDriver c
-        EndOfTransmission -> return Done
-        FreshLine txt     -> return (UserInput txt)
+-- | Forward 'EventOut' values, but terminate after forwarding the first 'Done'
+untilDone :: (Monad m) => Pipe EventOut EventOut m ()
+untilDone = do
+    e <- await
+    yield e
+    case e of
+        Done -> return ()
+        _    -> untilDone
 
-fromProducer :: Producer a IO () -> IO (Input a)
-fromProducer p = do
-    (o, i) <- spawn Unbounded
-    a <- async $ runEffect $ p >-> toOutput o
-    link a
-    return i
+rcplModel :: Terminfo -> Model Status EventIn EventOut
+rcplModel t = (yield Startup >> cat) >-> fromListT listT >-> untilDone
+  where
+    listT eventIn = do
+        cmd <- case eventIn of
+            Startup    -> return (PseudoTerminal AddPrompt)
+            Key    c   -> hoist readOnly (handleKey c)
+            Line   txt -> return (PseudoTerminal (PrependLine txt))
+            Prompt txt -> Select $ do
+                let prm' = S.fromList (T.unpack txt)
+                yield (PseudoTerminal (ChangePrompt prm'))
+                prompt .= prm'
+            Resize w h -> do
+                lift $ do
+                    width  .= w
+                    height .= h
+                mzero
+        case cmd of
+            PseudoTerminal c  ->
+                fmap (TerminalOutput . terminfo t) (terminalDriver c)
+            EndOfTransmission -> return  Done
+            FreshLine txt     -> return (UserInput txt)
 
-fromConsumer :: Consumer a IO () -> IO (Output a)
-fromConsumer p = do
-    (o, i) <- spawn Unbounded
-    a <- async $ runEffect $ fromInput i >-> p
-    link a
-    return o
+noBufferIn :: Managed IO.BufferMode
+noBufferIn = manage $ bracket setIn restoreIn
+  where
+    setIn =
+        IO.hGetBuffering IO.stdin <* IO.hSetBuffering IO.stdin IO.NoBuffering
+    restoreIn _i = return () -- IO.hSetBuffering IO.stdin i
+    -- TODO: Figure out why this doesn't work
 
-keys :: Producer Char IO ()
-keys = go
+noBufferOut :: Managed IO.BufferMode
+noBufferOut = manage $ bracket setOut restoreOut
+  where
+    setOut =
+        IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
+    restoreOut o = IO.hSetBuffering IO.stdout o
+
+noEcho :: Managed Bool
+noEcho = manage $ bracket setEcho restoreEcho
+  where
+    setEcho =
+        IO.hGetEcho IO.stdin <* IO.hSetEcho IO.stdin False
+    restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
+    -- TODO: Figure out why this doesn't work
+
+keys :: Managed (Controller Char)
+keys = fromProducer Unbounded go
   where
     go = do
         eof <- lift IO.isEOF
@@ -282,78 +310,71 @@ keys = go
             yield c
             go
 
+termout :: Terminal -> View TermOutput
+termout terminal = fromHandler (T.runTermOutput terminal)
+
 -- | A handle to the console
 data RCPL = RCPL
-    { _input        :: Input  Text
+    { _readLine     :: Input  Text
     , _writeLine    :: Output Text
     , _changePrompt :: Output Text
     }
 
 -- | Acquire the console, interacting with it through an 'RCPL' object
-withRCPL :: (RCPL -> IO a) -> IO a
-withRCPL k = 
-    bracket setIn   restoreIn   $ \_ -> do
-    bracket setOut  restoreOut  $ \_ -> do
-    bracket setEcho restoreEcho $ \_ -> do
-        term <- T.setupTermFromEnv
-        t <- case getTerminfo term of
+rcpl :: Managed RCPL
+rcpl = manage $ \k ->
+    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \keys' -> do
+        term  <- T.setupTermFromEnv
+        termI <- case getTerminfo term of
             Left  str -> ioError (userError str)
-            Right t   -> return t
-        iKey <- fromProducer keys
-        oTerm <- fromConsumer $ for cat (lift . T.runTermOutput term)
+            Right ti  -> return ti
+        (oWrite    , iWrite    , dWrite    ) <- spawn' Unbounded
         (oUserInput, iUserInput, dUserInput) <- spawn' Unbounded
-        (oWrite    , iWrite                ) <- spawn Unbounded
-        (oChange   , iChange               ) <- spawn Unbounded
-        (oDone     , iDone                 ) <- spawn Single
-        let iEventIn  =
-                    fmap (Right . Key   ) iKey
-                <|> fmap (Right . Line  ) iWrite
-                <|> fmap (Right . Prompt) iChange
-                <|> fmap  Left            iDone
+        (oChange   , iChange   , dChange   ) <- spawn' Unbounded
 
-            oEventOut = Output $ \e -> case e of
-                TerminalOutput termOutput -> send oTerm      termOutput
-                UserInput      txt        -> send oUserInput txt
-                Done                      -> send oDone      ()
+        let sealAll :: View ()
+            sealAll = fromHandler $ \() -> dWrite *> dUserInput *> dChange
 
-            generalize = return . runIdentity
-
-            eventOut e = hoist (hoist generalize) (rcplCore t e)
-
-            io = do
-                flip evalStateT initialStatus $ runEffect $
-                        (yield (Right Startup) >> fromInput iEventIn)
-                    >-> rights
-                    >-> for cat (every . eventOut)
-                    >-> toOutput oEventOut
-                atomically dUserInput
+            controller :: Controller EventIn
+            controller = mconcat
+                [ Key     <$> keys'
+                , Line    <$> iWrite
+                , Prompt  <$> iChange
+                ]
+    
+            model :: Model Status EventIn EventOut
+            model = rcplModel termI
+    
+            view :: View EventOut
+            view = mconcat
+                [ _TerminalOutput <#> termout term
+                , _UserInput      <#> oUserInput
+                , _Done           <#> sealAll
+                ]
+    
+            initialStatus :: Status
+            initialStatus = Status (S.fromList "> ") S.empty 80 24
+    
+            io = runMVC controller model view initialStatus
+    
         withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
-  where
-    rights = do
-        e <- await
-        case e of
-            Left  _ -> return ()
-            Right r -> do
-                yield r
-                rights
-    setIn   =
-        IO.hGetBuffering IO.stdin  <* IO.hSetBuffering IO.stdin  IO.NoBuffering
-    setOut  =
-        IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
-    setEcho =
-        IO.hGetEcho      IO.stdin  <* IO.hSetEcho      IO.stdin  False
-    restoreIn   _i = return ()  -- IO.hSetBuffering IO.stdin  i
-    restoreOut   o = IO.hSetBuffering IO.stdout o
-    restoreEcho _e = return ()  -- IO.hSetEcho      IO.stdin  e
+
+-- | Read a line from the console
+readLine :: RCPL -> IO (Maybe Text)
+readLine = atomically . recv . _readLine
 
 -- | Read lines from the console
 readLines :: RCPL -> Producer Text IO ()
-readLines = fromInput . _input
+readLines = fromInput . _readLine
 
 -- | Write a line to the console
-writeLine :: RCPL -> Text -> IO ()
-writeLine r txt = void $ atomically $ send (_writeLine r) txt
+writeLine :: RCPL -> Text -> IO Bool
+writeLine = send . _writeLine
+
+-- | Write lines to the console
+writeLines :: RCPL -> Consumer Text IO ()
+writeLines = toOutput . _writeLine
 
 -- | Change the prompt
-changePrompt :: RCPL -> Text -> IO ()
-changePrompt r txt = void $ atomically $ send (_changePrompt r) txt
+changePrompt :: RCPL -> Text -> IO Bool
+changePrompt = send . _changePrompt
