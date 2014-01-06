@@ -19,10 +19,11 @@ module RCPL (
 
     ) where
 
-import Control.Applicative ((<*>), (<*), (*>))
+import Control.Applicative ((<*), (*>))
 import Control.Exception (bracket)
 import Control.Monad (mzero)
-import Control.Lens hiding ((|>), each)
+import Control.Lens hiding ((|>), each, view)
+import qualified Control.Lens as L
 import Control.Concurrent.Async (withAsync)
 import Control.Monad (replicateM_, unless, when)
 import Data.Foldable (toList)
@@ -31,11 +32,10 @@ import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import MVC
-import qualified System.Console.Terminfo as T
-import System.Console.Terminfo (Terminal, TermOutput)
 import qualified System.IO as IO
 
 import RCPL.Status
+import RCPL.Terminal
 
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
@@ -71,27 +71,6 @@ data RCPLCommand
     | EndOfTransmission
     deriving (Eq, Show)
 
-{-| Low-level description of console interactions
-
-    Each of these constructors has a one-to-one correspondence with a @terminfo@
-    capability.
--}
-data TerminalCommand
-    -- Raw textual output
-    = InsertString String
-    | InsertChar Char
-
-    -- Control commands
-    | ClrEol
-    | CursorLeft
-    | CursorUp
-    | DeleteCharacter
-    | Newline
-    | ParmLeftCursor Int
-    | ParmRightCursor Int
-    | ParmDch Int
-    deriving (Eq, Show)
-
 -- | Events leaving the pure kernel
 data EventOut
     = TerminalOutput TermOutput
@@ -113,17 +92,6 @@ _Done = prism' (\_ -> Done) $ \x -> case x of
     Done -> Just ()
     _    -> Nothing
 
-data Terminfo = Terminfo
-    { clrEol          ::        TermOutput
-    , cursorLeft      ::        TermOutput
-    , cursorUp        ::        TermOutput
-    , deleteCharacter ::        TermOutput
-    , newline         ::        TermOutput
-    , parmLeftCursor  :: Int -> TermOutput
-    , parmRightCursor :: Int -> TermOutput
-    , parmDch         :: Int -> TermOutput
-    }
-
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
 
@@ -133,11 +101,11 @@ handleKey c = Select $ case c of
     '\DEL' -> yield (PseudoTerminal DeleteChar)
 
     '\n'   -> do
-        buf <- lift (view buffer)
+        buf <- lift (L.view buffer)
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
     '\EOT' -> do
-        buf <- lift (view buffer)
+        buf <- lift (L.view buffer)
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
 
@@ -202,40 +170,6 @@ terminalDriver cmd = Select $ do
             -- Print the new prompt and input buffer
             yield (InsertString $ toList $ prm' <> buf)
 
-note :: String -> Maybe a -> Either String a
-note str m = case m of
-    Nothing -> Left  ("getTerminfo: " ++ str ++ " does not exist")
-    Just a  -> Right a
-
-getTerminfo :: Terminal -> Either String Terminfo
-getTerminfo term =
-    let decode str  = T.getCapability term (T.tiGetOutput1 str)
-            :: Maybe TermOutput
-        decodeN str = T.getCapability term (T.tiGetOutput1 str)
-            :: Maybe (Int -> TermOutput)
-    in  Terminfo
-            <$> note "clr_eol"           (decode  "el"  )
-            <*> note "cursor_left"       (decode  "cub1")
-            <*> note "cursor_up"         (decode  "cuu1")
-            <*> note "delete_character"  (decode  "dch1")
-            <*> note "newline"           (T.getCapability term T.newline)
-            <*> note "parm_left_cursor"  (decodeN "cub" )
-            <*> note "parm_right_cursor" (decodeN "cuf" )
-            <*> note "parm_dch"          (decodeN "dch" )
-
-terminfo :: Terminfo -> TerminalCommand -> TermOutput
-terminfo t cmd = case cmd of
-    InsertString    str -> T.termText str
-    InsertChar      c   -> T.termText [c]
-    ClrEol              -> clrEol          t
-    CursorLeft          -> cursorLeft      t
-    CursorUp            -> cursorUp        t
-    DeleteCharacter     -> deleteCharacter t
-    Newline             -> newline         t
-    ParmLeftCursor  n   -> parmLeftCursor  t n
-    ParmRightCursor n   -> parmRightCursor t n
-    ParmDch         n   -> parmDch         t n
-
 -- | Forward 'EventOut' values, but terminate after forwarding the first 'Done'
 untilDone :: (Monad m) => Pipe EventOut EventOut m ()
 untilDone = do
@@ -245,8 +179,8 @@ untilDone = do
         Done -> return ()
         _    -> untilDone
 
-rcplModel :: Terminfo -> Model Status EventIn EventOut
-rcplModel t = (yield Startup >> cat) >-> fromListT listT >-> untilDone
+rcplModel :: (TerminalCommand -> TermOutput) -> Model Status EventIn EventOut
+rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
   where
     listT eventIn = do
         cmd <- case eventIn of
@@ -264,7 +198,7 @@ rcplModel t = (yield Startup >> cat) >-> fromListT listT >-> untilDone
                 mzero
         case cmd of
             PseudoTerminal c  ->
-                fmap (TerminalOutput . terminfo t) (terminalDriver c)
+                fmap (TerminalOutput . translate) (terminalDriver c)
             EndOfTransmission -> return  Done
             FreshLine txt     -> return (UserInput txt)
 
@@ -301,9 +235,6 @@ keys = fromProducer Unbounded go
             yield c
             go
 
-termout :: Terminal -> View TermOutput
-termout terminal = fromHandler (T.runTermOutput terminal)
-
 -- | A handle to the console
 data RCPL = RCPL
     { _readLine     :: Input  Text
@@ -315,10 +246,7 @@ data RCPL = RCPL
 rcpl :: Managed RCPL
 rcpl = manage $ \k ->
     with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \keys' -> do
-        term  <- T.setupTermFromEnv
-        termI <- case getTerminfo term of
-            Left  str -> ioError (userError str)
-            Right ti  -> return ti
+        (translate, termout) <- setupTerminal
         (oWrite    , iWrite    , dWrite    ) <- spawn' Unbounded
         (oUserInput, iUserInput, dUserInput) <- spawn' Unbounded
         (oChange   , iChange   , dChange   ) <- spawn' Unbounded
@@ -334,17 +262,14 @@ rcpl = manage $ \k ->
                 ]
     
             model :: Model Status EventIn EventOut
-            model = rcplModel termI
+            model = rcplModel translate
     
             view :: View EventOut
             view = mconcat
-                [ _TerminalOutput <#> termout term
+                [ _TerminalOutput <#> termout
                 , _UserInput      <#> oUserInput
                 , _Done           <#> sealAll
                 ]
-    
-            initialStatus :: Status
-            initialStatus = Status (S.fromList "> ") S.empty 80 24
     
             io = runMVC controller model view initialStatus
     
