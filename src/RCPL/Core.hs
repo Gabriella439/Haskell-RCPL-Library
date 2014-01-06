@@ -80,16 +80,16 @@ dropEnd n s = S.take (S.length s - n) s
 -- TODO: Support Home/End/Tab
 
 -- | Convert a key press to a high-level command
-handleKey :: Char -> ListT (State Status) RCPLCommand
+handleKey :: Char -> ListT (Reader (Seq Char)) RCPLCommand
 handleKey c = Select $ case c of
     '\DEL' -> yield (PseudoTerminal DeleteChar)
 
     '\n'   -> do
-        buf <- lift (use buffer)
+        buf <- lift ask
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
     '\EOT' -> do
-        buf <- lift (use buffer)
+        buf <- lift ask
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
 
@@ -171,7 +171,7 @@ rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
     listT eventIn = do
         cmd <- case eventIn of
             Startup    -> return (PseudoTerminal AddPrompt)
-            Key    c   -> handleKey c
+            Key    c   -> hoist (zoom buffer . readOnly) (handleKey c)
             Line   txt -> return (PseudoTerminal (PrependLine txt))
             Prompt txt -> Select $ do
                 let prm' = S.fromList (T.unpack txt)
