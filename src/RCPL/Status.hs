@@ -13,7 +13,7 @@ module RCPL.Status (
     ) where
 
 import Data.Sequence (Seq, fromList, empty)
-import Lens.Family2 (Lens')
+import Control.Lens (Lens')
 
 -- | Status of the printing loop
 data Status = Status

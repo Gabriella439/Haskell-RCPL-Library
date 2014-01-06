@@ -36,7 +36,6 @@ import RCPL.Core
 -- TODO: Get this to work on Windows
 -- TODO: Try to reuse more things from `terminfo`
 -- TODO: Tighten dependency ranges
--- TODO: Switch to `lens-family`
 
 noBufferIn :: Managed IO.BufferMode
 noBufferIn = manage $ bracket setIn restoreIn

@@ -1,11 +1,4 @@
-{-| The core logic for the @rcpl@ library
-
-    All of these functions are pure and can be tested using @QuickCheck@ and
-    also permit deterministic replays for debugging and testing purposes
-
-    The key function is 'rcplModel', which bundles the pure business logic of
-    the library using a 'Model' from the @mvc@ library
--}
+-- | The core logic for the @rcpl@ library
 
 module RCPL.Core (
     -- * Types
@@ -15,6 +8,7 @@ module RCPL.Core (
     , EventOut(..)
 
     -- * Logic
+    -- $logic
     , handleKey
     , terminalDriver
     , rcplModel
@@ -58,7 +52,7 @@ data RCPLTerminal
     | ChangePrompt (Seq Char) -- Change the prompt
     deriving (Eq, Show)
 
--- | Output coming out of the 'handleEventIn' stage
+-- | Terminal interactions extended with user input and termination
 data RCPLCommand
     = PseudoTerminal RCPLTerminal
     | FreshLine Text
@@ -70,6 +64,14 @@ data EventOut
     = TerminalOutput TermOutput
     | UserInput      Text
     | Done
+
+{- $logic
+    All of these functions are pure and can be tested using @QuickCheck@ and
+    also permit deterministic replays for debugging and testing purposes
+
+    The key function is 'rcplModel', which bundles the pure business logic of
+    the library using a 'Model' from the @mvc@ library
+-}
 
 dropEnd :: Int -> Seq a -> Seq a
 dropEnd n s = S.take (S.length s - n) s
