@@ -35,31 +35,14 @@ import qualified System.Console.Terminfo as T
 import System.Console.Terminfo (Terminal, TermOutput)
 import qualified System.IO as IO
 
+import RCPL.Status
+
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
 -- TODO: Get this to work on Windows
 -- TODO: Try to reuse more things from `terminfo`
 -- TODO: Tighten dependency ranges
 -- TODO: Switch to `lens-family`
-
-data Status = Status
-    { _prompt       :: Seq Char  -- The prompt
-    , _buffer       :: Seq Char  -- Contents of the input buffer
-    , _width        :: Int       -- Terminal width
-    , _height       :: Int       -- Terminal height
-    } deriving (Eq, Show)
-
-buffer :: Lens' Status (Seq Char)
-buffer f (Status p b w h) = fmap (\b' -> Status p b' w h) (f b)
-
-width :: Lens' Status Int
-width f (Status p b w h) = fmap (\w' -> Status p b w' h) (f w)
-
-height :: Lens' Status Int
-height f (Status p b w h) = fmap (\h' -> Status p b w h') (f h)
-
-prompt :: Lens' Status (Seq Char)
-prompt f (Status p b w h) = fmap (\p' -> Status p' b w h) (f p) 
 
 -- | Events coming into the pure kernel
 data EventIn
