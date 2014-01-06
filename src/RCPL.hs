@@ -34,8 +34,6 @@ import RCPL.Core
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
 -- TODO: Get this to work on Windows
--- TODO: Try to reuse more things from `terminfo`
--- TODO: Tighten dependency ranges
 
 noBufferIn :: Managed IO.BufferMode
 noBufferIn = manage $ bracket setIn restoreIn
@@ -101,9 +99,9 @@ rcpl = manage $ \k ->
     
             view :: View EventOut
             view = mconcat
-                [ _TerminalOutput <#> termout
-                , _UserInput      <#> oUserInput
-                , _Done           <#> sealAll
+                [ handles _TerminalOutput termout
+                , handles _UserInput      oUserInput
+                , handles _Done           sealAll
                 ]
     
             io = runMVC controller model view initialStatus

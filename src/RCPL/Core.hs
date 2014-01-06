@@ -13,7 +13,7 @@ module RCPL.Core (
     , terminalDriver
     , rcplModel
 
-    -- * Prisms
+    -- * Partial getters
     , _TerminalOutput
     , _UserInput
     , _Done
@@ -21,7 +21,7 @@ module RCPL.Core (
     ) where
 
 import Control.Monad (replicateM_, mzero, when)
-import Control.Lens (Prism', prism', (.=), (%=), use, view)
+import Lens.Family.State.Strict ((.=), (%=), use)
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
@@ -79,16 +79,16 @@ dropEnd n s = S.take (S.length s - n) s
 -- TODO: Support Home/End/Tab
 
 -- | Convert a key press to a high-level command
-handleKey :: Char -> ListT (Reader Status) RCPLCommand
+handleKey :: Char -> ListT (State Status) RCPLCommand
 handleKey c = Select $ case c of
     '\DEL' -> yield (PseudoTerminal DeleteChar)
 
     '\n'   -> do
-        buf <- lift (view buffer)
+        buf <- lift (use buffer)
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
     '\EOT' -> do
-        buf <- lift (view buffer)
+        buf <- lift (use buffer)
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
 
@@ -97,9 +97,9 @@ handleKey c = Select $ case c of
 -- | Convert high-level terminal commands to low-level terminal commands
 terminalDriver :: RCPLTerminal -> ListT (State Status) TerminalCommand
 terminalDriver cmd = Select $ do
-    buf <- use buffer
-    prm <- use prompt
-    w   <- use width
+    buf <- lift $ use buffer
+    prm <- lift $ use prompt
+    w   <- lift $ use width
     let bufTotal = prm <> buf
         len = S.length bufTotal
     let (numLines, numChars) = quotRem len w
@@ -170,12 +170,12 @@ rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
     listT eventIn = do
         cmd <- case eventIn of
             Startup    -> return (PseudoTerminal AddPrompt)
-            Key    c   -> hoist readOnly (handleKey c)
+            Key    c   -> handleKey c
             Line   txt -> return (PseudoTerminal (PrependLine txt))
             Prompt txt -> Select $ do
                 let prm' = S.fromList (T.unpack txt)
                 yield (PseudoTerminal (ChangePrompt prm'))
-                prompt .= prm'
+                lift $ prompt .= prm'
             Resize w h -> do
                 lift $ do
                     width  .= w
@@ -188,19 +188,19 @@ rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
             FreshLine txt     -> return (UserInput txt)
 
 -- | Raw terminal instructions
-_TerminalOutput :: Prism' EventOut TermOutput
-_TerminalOutput = prism' TerminalOutput $ \x -> case x of
+_TerminalOutput :: EventOut -> Maybe TermOutput
+_TerminalOutput x = case x of
     TerminalOutput y -> Just y
     _                -> Nothing
 
 -- | Lines fed to 'RCPL.readLine'
-_UserInput :: Prism' EventOut Text
-_UserInput = prism' UserInput $ \x -> case x of
+_UserInput :: EventOut -> Maybe Text
+_UserInput x = case x of
     UserInput y -> Just y
     _           -> Nothing
 
 -- | Console shutdown
-_Done :: Prism' EventOut ()
-_Done = prism' (\_ -> Done) $ \x -> case x of
+_Done :: EventOut -> Maybe ()
+_Done x = case x of
     Done -> Just ()
     _    -> Nothing

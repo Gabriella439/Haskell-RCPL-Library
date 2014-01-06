@@ -13,7 +13,7 @@ module RCPL.Status (
     ) where
 
 import Data.Sequence (Seq, fromList, empty)
-import Control.Lens (Lens')
+import Lens.Family (LensLike')
 
 -- | Status of the printing loop
 data Status = Status
@@ -37,21 +37,21 @@ initialStatus :: Status
 initialStatus = Status (fromList "> ") empty 80 24
     
 -- | The prompt
-prompt :: Lens' Status (Seq Char)
+prompt :: (Functor f) => LensLike' f Status (Seq Char)
 prompt f (Status p b w h) = fmap (\p' -> Status p' b w h) (f p) 
 {-# INLINABLe prompt #-}
 
 -- | Contents of the input buffer
-buffer :: Lens' Status (Seq Char)
+buffer :: (Functor f) => LensLike' f Status (Seq Char)
 buffer f (Status p b w h) = fmap (\b' -> Status p b' w h) (f b)
 {-# INLINABLE buffer #-}
 
 -- | Terminal width (columns)
-width :: Lens' Status Int
+width :: (Functor f) => LensLike' f Status Int
 width f (Status p b w h) = fmap (\w' -> Status p b w' h) (f w)
 {-# INLINABLE width #-}
 
 -- | Terminal height (rows)
-height :: Lens' Status Int
+height :: (Functor f) => LensLike' f Status Int
 height f (Status p b w h) = fmap (\h' -> Status p b w h') (f h)
 {-# INLINABLE height #-}
