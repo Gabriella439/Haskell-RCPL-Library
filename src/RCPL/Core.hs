@@ -3,14 +3,12 @@
 module RCPL.Core (
     -- * Types
       EventIn(..)
-    , Token(..)
     , RCPLTerminal(..)
     , RCPLCommand(..)
     , EventOut(..)
 
     -- * Logic
     -- $logic
-    , tokenize
     , handleToken
     , terminalDriver
     , rcplModel
@@ -26,9 +24,7 @@ module RCPL.Core (
 import Control.Monad (replicateM_, mzero, when)
 import Lens.Family.State.Strict ((.=), (%=), use)
 import Data.Foldable (toList)
-import Data.Map (Map)
-import qualified Data.Map as M
-import Data.Sequence (Seq, (|>), ViewL((:<)))
+import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -45,18 +41,6 @@ data EventIn
     | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
     deriving (Eq, Show)
-
--- | An input token which may correspond to more than one character
-data Token
-    = Character Char
-    | Home
-    | End
-    | MoveLeft
-    | MoveRight
-    | Delete
-    | Enter
-    | Tab
-    | EOT
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
@@ -95,45 +79,6 @@ dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Support Home/End/Tab
 
-tokens :: TermKeys -> Map (Seq Char) Token
-tokens tk = M.fromList $ map (\(str, v) -> (S.fromList str, v))
-    [ (home   tk, Home      )
-    , (end    tk, End       )
-    , (left   tk, MoveLeft  )
-    , (right  tk, MoveRight )
-    , (delete tk, Delete    )
-    , (enter  tk, Enter     )
-    , (tab    tk, Tab       )
-    , ("\EOT"   , EOT       )
-    ]
-
-isPrefixOf :: (Eq a) => Seq a -> Seq a -> Bool
-isPrefixOf s1 s2 = case S.viewl s1 of
-    S.EmptyL -> True
-    x:<s1'   -> case S.viewl s2 of
-        S.EmptyL -> False
-        y:<s2'   -> x == y && isPrefixOf s1' s2'
-
--- | Convert characters to tokens using a state machine
-tokenize :: TermKeys -> Char -> ListT (State (Seq Char)) Token
-tokenize tk c = Select $ do
-    str <- lift $ get
-    let str' = str |> c
-    loop str'
-  where
-    loop str =
-        if any (str `isPrefixOf`) (M.keys (tokens tk))
-        then case M.lookup str (tokens tk) of
-            Nothing -> lift $ put str
-            Just t  -> do
-                lift $ put S.empty
-                yield t
-        else case S.viewl str of
-            S.EmptyL -> return ()
-            s:<tr    -> do
-                yield (Character s)
-                loop tr
-
 -- | Convert a token to a high-level command
 handleToken :: Token -> ListT (Reader (Seq Char)) RCPLCommand
 handleToken t = Select $ case t of
@@ -143,7 +88,7 @@ handleToken t = Select $ case t of
         buf <- lift ask
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
-    EOT         -> do
+    Exit        -> do
         buf <- lift ask
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
@@ -154,7 +99,7 @@ handleToken t = Select $ case t of
     _ -> return ()
 
 -- | Convert high-level terminal commands to low-level terminal commands
-terminalDriver :: RCPLTerminal -> ListT (State Status) TerminalCommand
+terminalDriver :: RCPLTerminal -> ListT (State Status) Command
 terminalDriver cmd = Select $ do
     buf <- lift $ use buffer
     prm <- lift $ use prompt
@@ -224,17 +169,17 @@ untilDone = do
 
 -- | The entire 'Model' for the @rcpl@ library
 rcplModel
-    :: (TerminalCommand -> TermOutput)
-    -> TermKeys
+    :: Decoder
+    -> Encoder
     -> Model Status EventIn EventOut
-rcplModel translate tk =
+rcplModel dec enc =
     (yield Startup >> cat) >-> fromListT listT >-> untilDone
   where
     listT eventIn = do
         cmd <- case eventIn of
             Startup    -> return (PseudoTerminal AddPrompt)
             Key    c   -> do
-                t <- hoist (zoom token) (tokenize tk c)
+                t <- hoist (zoom token) (decode dec c)
                 hoist (zoom buffer . readOnly) (handleToken t)
             Line   txt -> return (PseudoTerminal (PrependLine txt))
             Prompt txt -> Select $ do
@@ -248,7 +193,7 @@ rcplModel translate tk =
                 mzero
         case cmd of
             PseudoTerminal c  ->
-                fmap (TerminalOutput . translate) (terminalDriver c)
+                fmap (TerminalOutput . encode enc) (terminalDriver c)
             EndOfTransmission -> return  Done
             FreshLine txt     -> return (UserInput txt)
 

@@ -22,14 +22,13 @@ module RCPL (
 
 import Control.Applicative ((<*), (*>))
 import Control.Exception (bracket)
-import Control.Monad (unless)
 import Control.Concurrent.Async (withAsync)
 import Data.Text (Text)
 import MVC
 import qualified System.IO as IO
 
 import RCPL.Status (Status(..), initialStatus)
-import RCPL.Terminal (setupTerminal)
+import RCPL.Terminal (Term(..), term)
 import RCPL.Core
 
 -- TODO: Handle characters that are not 1-column wide
@@ -59,16 +58,6 @@ noEcho = manage $ bracket setEcho restoreEcho
     restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
     -- TODO: Figure out why this doesn't work
 
-keys :: Managed (Controller Char)
-keys = fromProducer Unbounded go
-  where
-    go = do
-        eof <- lift IO.isEOF
-        unless eof $ do
-            c <- lift getChar
-            yield c
-            go
-
 -- | A handle to the console
 data RCPL = RCPL
     { _readLine     :: Input  Text
@@ -79,8 +68,8 @@ data RCPL = RCPL
 -- | Acquire the console, interacting with it through an 'RCPL' object
 rcpl :: Managed RCPL
 rcpl = manage $ \k ->
-    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \keys' -> do
-        (translate, vTerminal, termKeys) <- setupTerminal
+    with (noBufferIn *> noBufferOut *> noEcho *> term)
+        $ \(Term cTermIn decoder_ encoder_ vTermOut) -> do
         (vWrite    , cWrite    , sWrite    ) <- spawn' Unbounded
         (vUserInput, cUserInput, sUserInput) <- spawn' Unbounded
         (vChange   , cChange   , sChange   ) <- spawn' Unbounded
@@ -90,17 +79,17 @@ rcpl = manage $ \k ->
 
             controller :: Controller EventIn
             controller = mconcat
-                [ Key     <$> keys'
+                [ Key     <$> cTermIn
                 , Line    <$> cWrite
                 , Prompt  <$> cChange
                 ]
     
             model :: Model Status EventIn EventOut
-            model = rcplModel translate termKeys
+            model = rcplModel decoder_ encoder_
     
             view :: View EventOut
             view = mconcat
-                [ handles _TerminalOutput vTerminal
+                [ handles _TerminalOutput vTermOut
                 , handles _UserInput      vUserInput
                 , handles _Done           vSealAll
                 ]
