@@ -52,19 +52,19 @@ rcpl =
         let vSealAll :: View ()
             vSealAll = fromHandler $ \() -> sWrite *> sUserInput *> sChange
 
-            controller :: Controller (EventIn Char)
+            controller :: Controller (In Char)
             controller = mconcat
-                [ OtherIn <$> cTermIn
-                , Line    <$> cWrite
-                , Prompt  <$> cChange
+                [ In     <$> cTermIn
+                , Line   <$> cWrite
+                , Prompt <$> cChange
                 ]
     
-            model :: Model Status (EventIn Char) (EventOut TermOutput)
+            model :: Model Status (In Char) (Out TermOutput)
             model = rcplModel decoder_ encoder_
     
-            view :: View (EventOut TermOutput)
+            view :: View (Out TermOutput)
             view = mconcat
-                [ handles _OtherOut  vTermOut
+                [ handles _Out       vTermOut
                 , handles _UserInput vUserInput
                 , handles _Done      vSealAll
                 ]

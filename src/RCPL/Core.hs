@@ -2,24 +2,23 @@
 
 module RCPL.Core (
     -- * Types
-      EventIn(..)
-    , EventOut(..)
+      In(..)
+    , Out(..)
 
     -- * Logic
     -- $logic
-    , handleToken
     , terminalDriver
     , rcplModel
 
     -- * Partial getters
     -- $partial
-    , _OtherOut
+    , _Out
     , _UserInput
     , _Done
 
     ) where
 
-import Control.Monad (replicateM_, mzero, when)
+import Control.Monad (when)
 import Lens.Family.State.Strict ((.=), (%=), use)
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>))
@@ -32,23 +31,31 @@ import RCPL.Status
 import RCPL.Terminal
 
 -- | Events entering the pure kernel
-data EventIn a
-    = Startup         -- The first event
-    | Line   Text     -- Request to print a line to stdout
-    | Prompt Text     -- Request to change the prompt
-    | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
-    | OtherIn a       -- Used to hold a 'Char' or a 'Token'
+data In a
+    = In     a
+    -- ^ Used to hold 'Token's pre- and post-decoding
+    | Startup
+    -- ^ The first event
+    | Line   Text
+    -- ^ Request to print a line to stdout
+    | Prompt Text
+    -- ^ Request to change the prompt
+    | Resize Int Int
+    -- ^ Terminal resized: Field1 = Width, Field2 = Height
     deriving (Eq, Show)
 
 -- | Events leaving the pure kernel
-data EventOut a
-    = OtherOut a
+data Out a
+    = Out a
+    -- ^ Used to hold 'Command's pre- and post-decoding
     | UserInput Text
+    -- ^ Line read from user input
     | Done
+    -- ^ Session complete
 
-instance Functor EventOut where
+instance Functor Out where
     fmap f eventOut = case eventOut of
-        OtherOut a    -> OtherOut (f a)
+        Out       a   -> Out (f a)
         Done          -> Done
         UserInput txt -> UserInput txt
 
@@ -65,91 +72,82 @@ dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Support Home/End/Tab
 
--- | Convert a token to a high-level command
-handleToken :: Token -> ListT (Reader (Seq Char)) (EventOut (EventIn Token))
-handleToken t = Select $ case t of
-    Delete -> yield (OtherOut (OtherIn Delete))
-
-    Enter       -> do
-        buf <- lift ask
-        each [UserInput $ T.pack $ toList buf, OtherOut (OtherIn Enter)]
-
-    Exit        -> do
-        buf <- lift ask
-        when (S.length buf == 0) $
-            each [OtherOut (OtherIn Exit), Done]
-
-    Character c -> yield (OtherOut (OtherIn (Character c)))
-
-    -- TODO: Handle other cases
-    _ -> return ()
-
--- | Convert high-level terminal commands to low-level terminal commands
-terminalDriver :: EventIn Token -> ListT (State Status) Command
+-- | Translates decoded input events to output events pre-encoding
+terminalDriver :: In Token -> ListT (State Status) (Out Command)
 terminalDriver cmd = Select $ do
     buf <- lift $ use buffer
     prm <- lift $ use prompt
     w   <- lift $ use width
     let bufTotal = prm <> buf
         len = S.length bufTotal
-    let (numLines, numChars) = quotRem len w
+        (numLines, numChars) = quotRem len w
     case cmd of
+        Startup -> yield (Out $ InsertString $ toList prm)
+
         Line txt -> do
-            -- Delete the prompt and user input
-            each [ParmLeftCursor numChars, ClrEol]
-            replicateM_ numLines $ each [CursorUp, ClrEol]
+            let cmds =  [ParmLeftCursor numChars, ClrEol]
+                    ++  (replicate numLines () >> [CursorUp, ClrEol])
+                    ++  [InsertString (T.unpack txt)
+                        , Newline
+                        , InsertString (toList bufTotal)
+                        ]
+                    ++ if (numChars == 0 && numLines > 0) then [Newline] else []
+            each (map Out cmds)
 
-            -- Print the new output line and the prompt
-            each [ InsertString (T.unpack txt)
-                 , Newline
-                 , InsertString (toList bufTotal)
-                 ]
-            when (numChars == 0 && numLines > 0) $ yield Newline
+        Prompt txt -> do
+            let prm' = S.fromList (T.unpack txt)
 
-        OtherIn (Character c) -> do
-            yield (InsertChar c)
-            when (len + 1 == w) $ yield Newline
+            let cmds =
+                       [ParmLeftCursor numChars, ClrEol]
+                    ++ (replicate numLines () >> [CursorUp, ClrEol])
+                    ++ [InsertString $ toList $ prm' <> buf]
+            each (map Out cmds)
+
+            lift $ prompt .= prm'
+
+        Resize w' h' -> lift $ do
+            width  .= w'
+            height .= h'
+
+        In (Character c) -> do
+            let cmds = InsertChar c:if len + 1 == w then [Newline] else []
+            each (map Out cmds)
+
             lift $ buffer %= (|> c)
 
-        OtherIn Delete -> do
-            let m | numChars == 0 && numLines > 0 =
-                      each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
-                  | S.length buf > 0 = each [CursorLeft, DeleteCharacter]
-                  | otherwise = return ()
-            m
+        In Delete -> do
+            let cmds | numChars == 0 && numLines > 0 =
+                         [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
+                     | S.length buf > 0 = [CursorLeft, DeleteCharacter]
+                     | otherwise = []
+            each (map Out cmds)
 
             lift $ buffer %= dropEnd 1
 
-        OtherIn Enter -> do
-            -- Delete the prompt and user input
-            each [ParmLeftCursor numChars, ClrEol]
-            replicateM_ numLines $ each [CursorUp, ClrEol]
+        In Enter -> do
+            yield (UserInput $ T.pack $ toList buf)
 
-            -- Restore the prompt
-            yield (InsertString $ toList prm)
+            let cmds =
+                    [ParmLeftCursor numChars, ClrEol]
+                    ++ (replicate numLines () >> [CursorUp, ClrEol])
+                    ++ [InsertString (toList prm)]
+            each (map Out cmds)
 
             lift $ buffer .= S.empty
 
-        Startup -> yield (InsertString $ toList prm)
-
-        OtherIn Exit -> do
+        In Exit -> when (S.length buf == 0) $ do
             let prmLen = S.length prm
-            each [ParmLeftCursor prmLen, ParmDch prmLen]
 
-        Prompt txt -> do
-            -- Delete the prompt and user input
-            let prm' = S.fromList (T.unpack txt)
-            each [ParmLeftCursor numChars, ClrEol]
-            replicateM_ numLines $ each [CursorUp, ClrEol]
+            let cmds = [ParmLeftCursor prmLen, ParmDch prmLen]
+            each (map Out cmds)
 
-            -- Print the new prompt and input buffer
-            yield (InsertString $ toList $ prm' <> buf)
+            yield Done
 
-        -- TODO: Handle other cases
-        _ -> return ()
+        -- TODO: Handle other tokens
+        In _ -> return ()
 
--- | Forward 'EventOut' values, but terminate after forwarding the first 'Done'
-untilDone :: (Monad m) => Pipe (EventOut a) (EventOut a) m ()
+-- | Forward 'Out' values, but terminate after forwarding the first 'Done'
+untilDone :: (Monad m) => Pipe (Out a) (Out a) m ()
 untilDone = do
     e <- await
     yield e
@@ -157,48 +155,31 @@ untilDone = do
         Done -> return ()
         _    -> untilDone
 
-decodeStage
-    :: Decoder -> EventIn Char -> ListT (State (Seq Char)) (EventIn Token)
+decodeStage :: Decoder -> In Char -> ListT (State (Seq Char)) (In Token)
 decodeStage dec eventIn = case eventIn of
-    OtherIn  chr -> fmap OtherIn (decode dec chr)
-    Startup      -> return  Startup
-    Line   txt   -> return (Line   txt)
-    Prompt txt   -> return (Prompt txt)
-    Resize w h   -> return (Resize w h)
-
-terminalStage
-    :: EventOut (EventIn Token) -> ListT (State Status) (EventOut Command)
-terminalStage eventOut = case eventOut of
-    OtherOut  e   -> fmap OtherOut (terminalDriver e)
-    UserInput txt -> return (UserInput txt)
-    Done          -> return Done
+    In     chr -> fmap In (decode dec chr)
+    Startup    -> return  Startup
+    Line   txt -> return (Line   txt)
+    Prompt txt -> return (Prompt txt)
+    Resize w h -> return (Resize w h)
 
 -- | The entire 'Model' for the @rcpl@ library
 rcplModel
     :: Decoder
     -> Encoder
-    -> Model Status (EventIn Char) (EventOut TermOutput)
+    -> Model Status (In Char) (Out TermOutput)
 rcplModel dec enc =
+        -- In Char
         (yield Startup >> cat)
+        -- In Char
     >-> fromListT (hoist (zoom token) . decodeStage dec)
-    >-> fromListT listT
-    >-> fromListT terminalStage
+        -- In Token
+    >-> fromListT terminalDriver
+        -- Out Command
     >-> fromListT (return . fmap (encode enc))
+        -- Out TermOutput
     >-> untilDone
-  where
-    listT eventIn = case eventIn of
-        Startup    -> return (OtherOut Startup)
-        OtherIn t  -> hoist (zoom buffer . readOnly) (handleToken t)
-        Line   txt -> return (OtherOut (Line txt))
-        Prompt txt -> Select $ do
-            yield (OtherOut (Prompt txt))
-            let prm' = S.fromList (T.unpack txt)
-            lift $ prompt .= prm'
-        Resize w h -> do
-            lift $ do
-                width  .= w
-                height .= h
-            mzero
+        -- Out TermOutput
 
 {- $partial
     These are for use in conjunction with the 'handles' function from the @mvc@
@@ -206,19 +187,19 @@ rcplModel dec enc =
 -}
 
 -- | Other output values
-_OtherOut :: EventOut a -> Maybe a
-_OtherOut x = case x of
-    OtherOut y -> Just y
-    _          -> Nothing
+_Out :: Out a -> Maybe a
+_Out x = case x of
+    Out y -> Just y
+    _     -> Nothing
 
 -- | Lines fed to 'RCPL.readLine'
-_UserInput :: EventOut a -> Maybe Text
+_UserInput :: Out a -> Maybe Text
 _UserInput x = case x of
     UserInput y -> Just y
     _           -> Nothing
 
 -- | Console shutdown
-_Done :: EventOut a -> Maybe ()
+_Done :: Out a -> Maybe ()
 _Done x = case x of
     Done -> Just ()
     _    -> Nothing
