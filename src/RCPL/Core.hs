@@ -2,8 +2,8 @@
 
 module RCPL.Core (
     -- * Types
-      EventIn(..)
-    , RCPLTerminal(..)
+      EventIn
+    , Event(..)
     , RCPLCommand(..)
     , EventOut(..)
 
@@ -34,28 +34,25 @@ import RCPL.Status
 import RCPL.Terminal
 
 -- | Events coming into the pure kernel
-data EventIn
+type EventIn = Event Char
+
+{-| Event type reused for storing events before and after decoding terminal
+    input
+
+    Before decoding, the event type is @'Event' 'Char'@ and after decoding the
+    event type is @'Event' 'Token'@
+-}
+data Event a
     = Startup         -- The first event
-    | Key    Char     -- User typed a key
     | Line   Text     -- Request to print a line to stdout
     | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
-    deriving (Eq, Show)
-
--- | High-level representation of terminal interactions
-data RCPLTerminal
-    = AddPrompt               -- Print the prompt
-    | DeletePrompt            -- Clear the prompt
-    | PrependLine Text        -- Insert a line before the input buffer
-    | AppendChar Char         -- Insert a character at the end of the buffer
-    | DeleteChar              -- Remove a character from the end of the buffer
-    | DeleteBuffer            -- Remove the entire buffer
-    | ChangePrompt (Seq Char) -- Change the prompt
+    | Other a         -- Used to hold a 'Char' or a 'Token'
     deriving (Eq, Show)
 
 -- | Terminal interactions extended with user input and termination
 data RCPLCommand
-    = PseudoTerminal RCPLTerminal
+    = PseudoTerminal (Event Token)
     | FreshLine Text
     | EndOfTransmission
     deriving (Eq, Show)
@@ -82,24 +79,24 @@ dropEnd n s = S.take (S.length s - n) s
 -- | Convert a token to a high-level command
 handleToken :: Token -> ListT (Reader (Seq Char)) RCPLCommand
 handleToken t = Select $ case t of
-    Delete -> yield (PseudoTerminal DeleteChar)
+    Delete -> yield (PseudoTerminal (Other Delete))
 
     Enter       -> do
         buf <- lift ask
-        each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
+        each [FreshLine $ T.pack $ toList buf, PseudoTerminal (Other Enter)]
 
     Exit        -> do
         buf <- lift ask
         when (S.length buf == 0) $
-            each [PseudoTerminal DeletePrompt, EndOfTransmission]
+            each [PseudoTerminal (Other Exit), EndOfTransmission]
 
-    Character c -> yield (PseudoTerminal (AppendChar c))
+    Character c -> yield (PseudoTerminal (Other (Character c)))
 
     -- TODO: Handle other cases
     _ -> return ()
 
 -- | Convert high-level terminal commands to low-level terminal commands
-terminalDriver :: RCPLTerminal -> ListT (State Status) Command
+terminalDriver :: Event Token -> ListT (State Status) Command
 terminalDriver cmd = Select $ do
     buf <- lift $ use buffer
     prm <- lift $ use prompt
@@ -108,7 +105,7 @@ terminalDriver cmd = Select $ do
         len = S.length bufTotal
     let (numLines, numChars) = quotRem len w
     case cmd of
-        PrependLine txt -> do
+        Line txt -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
@@ -120,12 +117,12 @@ terminalDriver cmd = Select $ do
                  ]
             when (numChars == 0 && numLines > 0) $ yield Newline
 
-        AppendChar c -> do
+        Other (Character c) -> do
             yield (InsertChar c)
             when (len + 1 == w) $ yield Newline
             lift $ buffer %= (|> c)
 
-        DeleteChar -> do
+        Other Delete -> do
             let m | numChars == 0 && numLines > 0 =
                       each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
                   | S.length buf > 0 = each [CursorLeft, DeleteCharacter]
@@ -134,7 +131,7 @@ terminalDriver cmd = Select $ do
 
             lift $ buffer %= dropEnd 1
 
-        DeleteBuffer -> do
+        Other Enter -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
@@ -144,19 +141,23 @@ terminalDriver cmd = Select $ do
 
             lift $ buffer .= S.empty
 
-        AddPrompt    -> yield (InsertString $ toList prm)
+        Startup -> yield (InsertString $ toList prm)
 
-        DeletePrompt -> do
+        Other Exit -> do
             let prmLen = S.length prm
             each [ParmLeftCursor prmLen, ParmDch prmLen]
 
-        ChangePrompt prm' -> do
+        Prompt txt -> do
             -- Delete the prompt and user input
+            let prm' = S.fromList (T.unpack txt)
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
 
             -- Print the new prompt and input buffer
             yield (InsertString $ toList $ prm' <> buf)
+
+        -- TODO: Handle other cases
+        _ -> return ()
 
 -- | Forward 'EventOut' values, but terminate after forwarding the first 'Done'
 untilDone :: (Monad m) => Pipe EventOut EventOut m ()
@@ -167,24 +168,33 @@ untilDone = do
         Done -> return ()
         _    -> untilDone
 
+stage1 :: Decoder -> Event Char -> ListT (State (Seq Char)) (Event Token)
+stage1 dec eventIn = case eventIn of
+    Other  chr -> fmap Other (decode dec chr)
+    Startup    -> return  Startup
+    Line   txt -> return (Line   txt)
+    Prompt txt -> return (Prompt txt)
+    Resize w h -> return (Resize w h)
+
 -- | The entire 'Model' for the @rcpl@ library
 rcplModel
     :: Decoder
     -> Encoder
     -> Model Status EventIn EventOut
 rcplModel dec enc =
-    (yield Startup >> cat) >-> fromListT listT >-> untilDone
+        (yield Startup >> cat)
+    >-> fromListT (hoist (zoom token) . stage1 dec)
+    >-> fromListT listT
+    >-> untilDone
   where
     listT eventIn = do
         cmd <- case eventIn of
-            Startup    -> return (PseudoTerminal AddPrompt)
-            Key    c   -> do
-                t <- hoist (zoom token) (decode dec c)
-                hoist (zoom buffer . readOnly) (handleToken t)
-            Line   txt -> return (PseudoTerminal (PrependLine txt))
+            Startup    -> return (PseudoTerminal Startup)
+            Other  t   -> hoist (zoom buffer . readOnly) (handleToken t)
+            Line   txt -> return (PseudoTerminal (Line txt))
             Prompt txt -> Select $ do
+                yield (PseudoTerminal (Prompt txt))
                 let prm' = S.fromList (T.unpack txt)
-                yield (PseudoTerminal (ChangePrompt prm'))
                 lift $ prompt .= prm'
             Resize w h -> do
                 lift $ do
@@ -192,8 +202,8 @@ rcplModel dec enc =
                     height .= h
                 mzero
         case cmd of
-            PseudoTerminal c  ->
-                fmap (TerminalOutput . encode enc) (terminalDriver c)
+            PseudoTerminal e  ->
+                fmap (TerminalOutput . encode enc) (terminalDriver e)
             EndOfTransmission -> return  Done
             FreshLine txt     -> return (UserInput txt)
 

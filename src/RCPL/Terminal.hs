@@ -141,6 +141,7 @@ data Token
     | Enter
     | Tab
     | Exit
+    deriving (Eq, Show)
 
 -- | Recognized input sequences
 tokens :: Decoder -> Map (Seq Char) Token

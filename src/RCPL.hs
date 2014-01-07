@@ -54,7 +54,7 @@ rcpl =
 
             controller :: Controller EventIn
             controller = mconcat
-                [ Key     <$> cTermIn
+                [ Other   <$> cTermIn
                 , Line    <$> cWrite
                 , Prompt  <$> cChange
                 ]
