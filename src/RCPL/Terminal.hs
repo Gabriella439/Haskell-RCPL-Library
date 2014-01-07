@@ -24,7 +24,8 @@ module RCPL.Terminal (
     , TermOutput
     ) where
 
-import Control.Applicative ((<*>), pure, liftA2)
+import Control.Applicative ((<*>), (*>), (<*), pure, liftA2)
+import Control.Exception (bracket)
 import Control.Monad (unless)
 import System.Console.Terminfo (TermOutput, Terminal)
 import Data.Map (Map)
@@ -33,7 +34,7 @@ import Data.Sequence (Seq, (|>), ViewL((:<)))
 import qualified Data.Sequence as S
 import qualified System.Console.Terminfo as T
 import MVC
-import System.IO (isEOF)
+import qualified System.IO as IO
 
 -- | Data structure used to decode 'Terminal' input and encode 'Terminal' output
 data Term = Term
@@ -47,6 +48,29 @@ data Term = Term
       -- ^ Output stream of raw 'TermOutput'
     }
 
+noBufferIn :: Managed IO.BufferMode
+noBufferIn = manage $ bracket setIn restoreIn
+  where
+    setIn =
+        IO.hGetBuffering IO.stdin <* IO.hSetBuffering IO.stdin IO.NoBuffering
+    restoreIn _i = return () -- IO.hSetBuffering IO.stdin i
+    -- TODO: Figure out why this doesn't work
+
+noBufferOut :: Managed IO.BufferMode
+noBufferOut = manage $ bracket setOut restoreOut
+  where
+    setOut =
+        IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
+    restoreOut o = IO.hSetBuffering IO.stdout o
+
+noEcho :: Managed Bool
+noEcho = manage $ bracket setEcho restoreEcho
+  where
+    setEcho =
+        IO.hGetEcho IO.stdin <* IO.hSetEcho IO.stdin False
+    restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
+    -- TODO: Figure out why this doesn't work
+
 {-| A 'Managed' pseudo-handle to the terminal
 
     'term' throws an 'IOException' if the terminal does not support a command
@@ -55,7 +79,7 @@ data Term = Term
 term :: Managed Term
 term =
     manage    $ \k -> do
-    with keys $ \termIn_ -> do
+    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \termIn_ -> do
         terminal <- T.setupTermFromEnv
         (decoder_, encoder_) <-
             case liftA2 (,) (getDecoder terminal) (getEncoder terminal) of
@@ -69,7 +93,7 @@ keys :: Managed (Controller Char)
 keys = fromProducer Unbounded go
   where
     go = do
-        eof <- lift isEOF
+        eof <- lift IO.isEOF
         unless eof $ do
             c <- lift getChar
             yield c

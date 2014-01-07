@@ -20,12 +20,10 @@ module RCPL (
     , writeLines
     ) where
 
-import Control.Applicative ((<*), (*>))
-import Control.Exception (bracket)
+import Control.Applicative ((*>))
 import Control.Concurrent.Async (withAsync)
 import Data.Text (Text)
 import MVC
-import qualified System.IO as IO
 
 import RCPL.Status (Status(..), initialStatus)
 import RCPL.Terminal (Term(..), term)
@@ -34,29 +32,6 @@ import RCPL.Core
 -- TODO: Handle characters that are not 1-column wide
 -- TODO: Handle resizes
 -- TODO: Get this to work on Windows
-
-noBufferIn :: Managed IO.BufferMode
-noBufferIn = manage $ bracket setIn restoreIn
-  where
-    setIn =
-        IO.hGetBuffering IO.stdin <* IO.hSetBuffering IO.stdin IO.NoBuffering
-    restoreIn _i = return () -- IO.hSetBuffering IO.stdin i
-    -- TODO: Figure out why this doesn't work
-
-noBufferOut :: Managed IO.BufferMode
-noBufferOut = manage $ bracket setOut restoreOut
-  where
-    setOut =
-        IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
-    restoreOut o = IO.hSetBuffering IO.stdout o
-
-noEcho :: Managed Bool
-noEcho = manage $ bracket setEcho restoreEcho
-  where
-    setEcho =
-        IO.hGetEcho IO.stdin <* IO.hSetEcho IO.stdin False
-    restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
-    -- TODO: Figure out why this doesn't work
 
 -- | A handle to the console
 data RCPL = RCPL
@@ -67,9 +42,9 @@ data RCPL = RCPL
 
 -- | Acquire the console, interacting with it through an 'RCPL' object
 rcpl :: Managed RCPL
-rcpl = manage $ \k ->
-    with (noBufferIn *> noBufferOut *> noEcho *> term)
-        $ \(Term cTermIn decoder_ encoder_ vTermOut) -> do
+rcpl =
+    manage $ \k ->
+    with term $ \(Term cTermIn decoder_ encoder_ vTermOut) -> do
         (vWrite    , cWrite    , sWrite    ) <- spawn' Unbounded
         (vUserInput, cUserInput, sUserInput) <- spawn' Unbounded
         (vChange   , cChange   , sChange   ) <- spawn' Unbounded
