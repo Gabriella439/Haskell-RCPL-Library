@@ -8,13 +8,14 @@
 module RCPL.Terminal (
     -- * Terminal
       TerminalCommand(..)
+    , TermKeys(..)
     , setupTerminal
 
     -- * Re-exports
     , TermOutput
     ) where
 
-import Control.Applicative ((<$>), (<*>))
+import Control.Applicative ((<$>), (<*>), pure, liftA2)
 import System.Console.Terminfo (TermOutput, Terminal)
 import qualified System.Console.Terminfo as T
 import MVC (View, fromHandler)
@@ -52,6 +53,32 @@ getTerminfo term =
             <*> note "parm_left_cursor"  (decodeN "cub" )
             <*> note "parm_right_cursor" (decodeN "cuf" )
             <*> note "parm_dch"          (decodeN "dch" )
+
+-- | Special terminal keys that we need to detect
+data TermKeys = TermKeys 
+    { home   :: String
+    , end    :: String
+    , left   :: String
+    , right  :: String
+    , delete :: String
+    , enter  :: String
+    , tab    :: String
+    }
+
+-- | Detect all special keys or die trying
+getTermKeys :: Terminal -> Either String TermKeys
+getTermKeys term = TermKeys
+    <$> decode "key_home"  T.keyHome
+    <*> decode "key_end"   T.keyEnd
+    <*> decode "key_left"  T.keyLeft
+    <*> decode "key_right" T.keyRight
+    <*> pure "\DEL"
+    <*> pure "\n"
+    <*> pure "\t"
+  where
+    decode str c = case T.getCapability term c of
+        Nothing -> Left ("getTermKeys: " ++ str ++ " does not exist")
+        Just a  -> Right a
 
 {-| Low-level description of console interactions
 
@@ -97,13 +124,19 @@ translate t cmd = case cmd of
 
     * a 'View' for 'TermOutput'
 
+    * Key bindings
+
     Throws an 'IOException' if the terminal does not support a necessary
     command
 -}
-setupTerminal :: IO (TerminalCommand -> TermOutput, View TermOutput)
+setupTerminal :: IO (TerminalCommand -> TermOutput, View TermOutput, TermKeys)
 setupTerminal = do
     terminal <- T.setupTermFromEnv
-    termInfo <- case getTerminfo terminal of
-        Left  str -> ioError (userError str)
-        Right ti  -> return ti
-    return (translate termInfo, fromHandler (T.runTermOutput terminal))
+    (termInfo, termKeys) <-
+        case liftA2 (,) (getTerminfo terminal) (getTermKeys terminal) of
+            Left  str -> ioError (userError str)
+            Right x-> return x
+    return ( translate termInfo
+           , fromHandler (T.runTermOutput terminal)
+           , termKeys
+           )

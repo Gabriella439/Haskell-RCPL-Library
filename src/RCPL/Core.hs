@@ -3,13 +3,15 @@
 module RCPL.Core (
     -- * Types
       EventIn(..)
+    , Token(..)
     , RCPLTerminal(..)
     , RCPLCommand(..)
     , EventOut(..)
 
     -- * Logic
     -- $logic
-    , handleKey
+    , tokenize
+    , handleToken
     , terminalDriver
     , rcplModel
 
@@ -24,7 +26,9 @@ module RCPL.Core (
 import Control.Monad (replicateM_, mzero, when)
 import Lens.Family.State.Strict ((.=), (%=), use)
 import Data.Foldable (toList)
-import Data.Sequence (Seq, (|>))
+import Data.Map (Map)
+import qualified Data.Map as M
+import Data.Sequence (Seq, (|>), ViewL((:<)))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -41,6 +45,18 @@ data EventIn
     | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
     deriving (Eq, Show)
+
+-- | An input token which may correspond to more than one character
+data Token
+    = Character Char
+    | Home
+    | End
+    | MoveLeft
+    | MoveRight
+    | Delete
+    | Enter
+    | Tab
+    | EOT
 
 -- | High-level representation of terminal interactions
 data RCPLTerminal
@@ -70,8 +86,8 @@ data EventOut
     All of these functions are pure, meaning that they can be tested using
     @QuickCheck@, reused in other contexts, and replayed deterministically
 
-    The key function is 'rcplModel', which bundles the pure business logic of
-    the library using a 'Model' from the @mvc@ library
+    The key function is 'rcplModel', which bundles the logic of the entire
+    library using a 'Model' from the @mvc@ library
 -}
 
 dropEnd :: Int -> Seq a -> Seq a
@@ -79,21 +95,63 @@ dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Support Home/End/Tab
 
--- | Convert a key press to a high-level command
-handleKey :: Char -> ListT (Reader (Seq Char)) RCPLCommand
-handleKey c = Select $ case c of
-    '\DEL' -> yield (PseudoTerminal DeleteChar)
+tokens :: TermKeys -> Map (Seq Char) Token
+tokens tk = M.fromList $ map (\(str, v) -> (S.fromList str, v))
+    [ (home   tk, Home      )
+    , (end    tk, End       )
+    , (left   tk, MoveLeft  )
+    , (right  tk, MoveRight )
+    , (delete tk, Delete    )
+    , (enter  tk, Enter     )
+    , (tab    tk, Tab       )
+    , ("\EOT"   , EOT       )
+    ]
 
-    '\n'   -> do
+isPrefixOf :: (Eq a) => Seq a -> Seq a -> Bool
+isPrefixOf s1 s2 = case S.viewl s1 of
+    S.EmptyL -> True
+    x:<s1'   -> case S.viewl s2 of
+        S.EmptyL -> False
+        y:<s2'   -> x == y && isPrefixOf s1' s2'
+
+-- | Convert characters to tokens using a state machine
+tokenize :: TermKeys -> Char -> ListT (State (Seq Char)) Token
+tokenize tk c = Select $ do
+    str <- lift $ get
+    let str' = str |> c
+    loop str'
+  where
+    loop str =
+        if any (str `isPrefixOf`) (M.keys (tokens tk))
+        then case M.lookup str (tokens tk) of
+            Nothing -> lift $ put str
+            Just t  -> do
+                lift $ put S.empty
+                yield t
+        else case S.viewl str of
+            S.EmptyL -> return ()
+            s:<tr    -> do
+                yield (Character s)
+                loop tr
+
+-- | Convert a token to a high-level command
+handleToken :: Token -> ListT (Reader (Seq Char)) RCPLCommand
+handleToken t = Select $ case t of
+    Delete -> yield (PseudoTerminal DeleteChar)
+
+    Enter       -> do
         buf <- lift ask
         each [FreshLine $ T.pack $ toList buf, PseudoTerminal DeleteBuffer]
 
-    '\EOT' -> do
+    EOT         -> do
         buf <- lift ask
         when (S.length buf == 0) $
             each [PseudoTerminal DeletePrompt, EndOfTransmission]
 
-    _      -> yield (PseudoTerminal (AppendChar c))
+    Character c -> yield (PseudoTerminal (AppendChar c))
+
+    -- TODO: Handle other cases
+    _ -> return ()
 
 -- | Convert high-level terminal commands to low-level terminal commands
 terminalDriver :: RCPLTerminal -> ListT (State Status) TerminalCommand
@@ -165,13 +223,19 @@ untilDone = do
         _    -> untilDone
 
 -- | The entire 'Model' for the @rcpl@ library
-rcplModel :: (TerminalCommand -> TermOutput) -> Model Status EventIn EventOut
-rcplModel translate = (yield Startup >> cat) >-> fromListT listT >-> untilDone
+rcplModel
+    :: (TerminalCommand -> TermOutput)
+    -> TermKeys
+    -> Model Status EventIn EventOut
+rcplModel translate tk =
+    (yield Startup >> cat) >-> fromListT listT >-> untilDone
   where
     listT eventIn = do
         cmd <- case eventIn of
             Startup    -> return (PseudoTerminal AddPrompt)
-            Key    c   -> hoist (zoom buffer . readOnly) (handleKey c)
+            Key    c   -> do
+                t <- hoist (zoom token) (tokenize tk c)
+                hoist (zoom buffer . readOnly) (handleToken t)
             Line   txt -> return (PseudoTerminal (PrependLine txt))
             Prompt txt -> Select $ do
                 let prm' = S.fromList (T.unpack txt)

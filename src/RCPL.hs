@@ -1,4 +1,6 @@
-{-| A read-concurrent-print loop -}
+{-| 'RCPL' is an abbreviation for /R/ead-/C/oncurrent-/P/rint /L/oop
+
+-}
 
 module RCPL (
     -- * The console
@@ -16,7 +18,6 @@ module RCPL (
     -- $pipes
     , readLines
     , writeLines
-
     ) where
 
 import Control.Applicative ((<*), (*>))
@@ -79,34 +80,34 @@ data RCPL = RCPL
 rcpl :: Managed RCPL
 rcpl = manage $ \k ->
     with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \keys' -> do
-        (translate, termout) <- setupTerminal
-        (oWrite    , iWrite    , dWrite    ) <- spawn' Unbounded
-        (oUserInput, iUserInput, dUserInput) <- spawn' Unbounded
-        (oChange   , iChange   , dChange   ) <- spawn' Unbounded
+        (translate, vTerminal, termKeys) <- setupTerminal
+        (vWrite    , cWrite    , sWrite    ) <- spawn' Unbounded
+        (vUserInput, cUserInput, sUserInput) <- spawn' Unbounded
+        (vChange   , cChange   , sChange   ) <- spawn' Unbounded
 
-        let sealAll :: View ()
-            sealAll = fromHandler $ \() -> dWrite *> dUserInput *> dChange
+        let vSealAll :: View ()
+            vSealAll = fromHandler $ \() -> sWrite *> sUserInput *> sChange
 
             controller :: Controller EventIn
             controller = mconcat
                 [ Key     <$> keys'
-                , Line    <$> iWrite
-                , Prompt  <$> iChange
+                , Line    <$> cWrite
+                , Prompt  <$> cChange
                 ]
     
             model :: Model Status EventIn EventOut
-            model = rcplModel translate
+            model = rcplModel translate termKeys
     
             view :: View EventOut
             view = mconcat
-                [ handles _TerminalOutput termout
-                , handles _UserInput      oUserInput
-                , handles _Done           sealAll
+                [ handles _TerminalOutput vTerminal
+                , handles _UserInput      vUserInput
+                , handles _Done           vSealAll
                 ]
     
             io = runMVC controller model view initialStatus
     
-        withAsync io $ \_ -> k (RCPL iUserInput oWrite oChange)
+        withAsync io $ \_ -> k (RCPL cUserInput vWrite vChange)
 
 {- $commands
     These commands will fail and return 'Nothing' \/ 'False' if the console has
