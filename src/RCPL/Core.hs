@@ -2,9 +2,7 @@
 
 module RCPL.Core (
     -- * Types
-      EventIn
-    , Event(..)
-    , RCPLCommand(..)
+      EventIn(..)
     , EventOut(..)
 
     -- * Logic
@@ -15,7 +13,7 @@ module RCPL.Core (
 
     -- * Partial getters
     -- $partial
-    , _TerminalOutput
+    , _OtherOut
     , _UserInput
     , _Done
 
@@ -33,35 +31,26 @@ import MVC
 import RCPL.Status
 import RCPL.Terminal
 
--- | Events coming into the pure kernel
-type EventIn = Event Char
-
-{-| Event type reused for storing events before and after decoding terminal
-    input
-
-    Before decoding, the event type is @'Event' 'Char'@ and after decoding the
-    event type is @'Event' 'Token'@
--}
-data Event a
+-- | Events entering the pure kernel
+data EventIn a
     = Startup         -- The first event
     | Line   Text     -- Request to print a line to stdout
     | Prompt Text     -- Request to change the prompt
     | Resize Int Int  -- Terminal resized: Field1 = Width, Field2 = Height
-    | Other a         -- Used to hold a 'Char' or a 'Token'
-    deriving (Eq, Show)
-
--- | Terminal interactions extended with user input and termination
-data RCPLCommand
-    = PseudoTerminal (Event Token)
-    | FreshLine Text
-    | EndOfTransmission
+    | OtherIn a       -- Used to hold a 'Char' or a 'Token'
     deriving (Eq, Show)
 
 -- | Events leaving the pure kernel
-data EventOut
-    = TerminalOutput TermOutput
-    | UserInput      Text
+data EventOut a
+    = OtherOut a
+    | UserInput Text
     | Done
+
+instance Functor EventOut where
+    fmap f eventOut = case eventOut of
+        OtherOut a    -> OtherOut (f a)
+        Done          -> Done
+        UserInput txt -> UserInput txt
 
 {- $logic
     All of these functions are pure, meaning that they can be tested using
@@ -77,26 +66,26 @@ dropEnd n s = S.take (S.length s - n) s
 -- TODO: Support Home/End/Tab
 
 -- | Convert a token to a high-level command
-handleToken :: Token -> ListT (Reader (Seq Char)) RCPLCommand
+handleToken :: Token -> ListT (Reader (Seq Char)) (EventOut (EventIn Token))
 handleToken t = Select $ case t of
-    Delete -> yield (PseudoTerminal (Other Delete))
+    Delete -> yield (OtherOut (OtherIn Delete))
 
     Enter       -> do
         buf <- lift ask
-        each [FreshLine $ T.pack $ toList buf, PseudoTerminal (Other Enter)]
+        each [UserInput $ T.pack $ toList buf, OtherOut (OtherIn Enter)]
 
     Exit        -> do
         buf <- lift ask
         when (S.length buf == 0) $
-            each [PseudoTerminal (Other Exit), EndOfTransmission]
+            each [OtherOut (OtherIn Exit), Done]
 
-    Character c -> yield (PseudoTerminal (Other (Character c)))
+    Character c -> yield (OtherOut (OtherIn (Character c)))
 
     -- TODO: Handle other cases
     _ -> return ()
 
 -- | Convert high-level terminal commands to low-level terminal commands
-terminalDriver :: Event Token -> ListT (State Status) Command
+terminalDriver :: EventIn Token -> ListT (State Status) Command
 terminalDriver cmd = Select $ do
     buf <- lift $ use buffer
     prm <- lift $ use prompt
@@ -117,12 +106,12 @@ terminalDriver cmd = Select $ do
                  ]
             when (numChars == 0 && numLines > 0) $ yield Newline
 
-        Other (Character c) -> do
+        OtherIn (Character c) -> do
             yield (InsertChar c)
             when (len + 1 == w) $ yield Newline
             lift $ buffer %= (|> c)
 
-        Other Delete -> do
+        OtherIn Delete -> do
             let m | numChars == 0 && numLines > 0 =
                       each [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
                   | S.length buf > 0 = each [CursorLeft, DeleteCharacter]
@@ -131,7 +120,7 @@ terminalDriver cmd = Select $ do
 
             lift $ buffer %= dropEnd 1
 
-        Other Enter -> do
+        OtherIn Enter -> do
             -- Delete the prompt and user input
             each [ParmLeftCursor numChars, ClrEol]
             replicateM_ numLines $ each [CursorUp, ClrEol]
@@ -143,7 +132,7 @@ terminalDriver cmd = Select $ do
 
         Startup -> yield (InsertString $ toList prm)
 
-        Other Exit -> do
+        OtherIn Exit -> do
             let prmLen = S.length prm
             each [ParmLeftCursor prmLen, ParmDch prmLen]
 
@@ -160,7 +149,7 @@ terminalDriver cmd = Select $ do
         _ -> return ()
 
 -- | Forward 'EventOut' values, but terminate after forwarding the first 'Done'
-untilDone :: (Monad m) => Pipe EventOut EventOut m ()
+untilDone :: (Monad m) => Pipe (EventOut a) (EventOut a) m ()
 untilDone = do
     e <- await
     yield e
@@ -168,64 +157,68 @@ untilDone = do
         Done -> return ()
         _    -> untilDone
 
-stage1 :: Decoder -> Event Char -> ListT (State (Seq Char)) (Event Token)
-stage1 dec eventIn = case eventIn of
-    Other  chr -> fmap Other (decode dec chr)
-    Startup    -> return  Startup
-    Line   txt -> return (Line   txt)
-    Prompt txt -> return (Prompt txt)
-    Resize w h -> return (Resize w h)
+decodeStage
+    :: Decoder -> EventIn Char -> ListT (State (Seq Char)) (EventIn Token)
+decodeStage dec eventIn = case eventIn of
+    OtherIn  chr -> fmap OtherIn (decode dec chr)
+    Startup      -> return  Startup
+    Line   txt   -> return (Line   txt)
+    Prompt txt   -> return (Prompt txt)
+    Resize w h   -> return (Resize w h)
+
+terminalStage
+    :: EventOut (EventIn Token) -> ListT (State Status) (EventOut Command)
+terminalStage eventOut = case eventOut of
+    OtherOut  e   -> fmap OtherOut (terminalDriver e)
+    UserInput txt -> return (UserInput txt)
+    Done          -> return Done
 
 -- | The entire 'Model' for the @rcpl@ library
 rcplModel
     :: Decoder
     -> Encoder
-    -> Model Status EventIn EventOut
+    -> Model Status (EventIn Char) (EventOut TermOutput)
 rcplModel dec enc =
         (yield Startup >> cat)
-    >-> fromListT (hoist (zoom token) . stage1 dec)
+    >-> fromListT (hoist (zoom token) . decodeStage dec)
     >-> fromListT listT
+    >-> fromListT terminalStage
+    >-> fromListT (return . fmap (encode enc))
     >-> untilDone
   where
-    listT eventIn = do
-        cmd <- case eventIn of
-            Startup    -> return (PseudoTerminal Startup)
-            Other  t   -> hoist (zoom buffer . readOnly) (handleToken t)
-            Line   txt -> return (PseudoTerminal (Line txt))
-            Prompt txt -> Select $ do
-                yield (PseudoTerminal (Prompt txt))
-                let prm' = S.fromList (T.unpack txt)
-                lift $ prompt .= prm'
-            Resize w h -> do
-                lift $ do
-                    width  .= w
-                    height .= h
-                mzero
-        case cmd of
-            PseudoTerminal e  ->
-                fmap (TerminalOutput . encode enc) (terminalDriver e)
-            EndOfTransmission -> return  Done
-            FreshLine txt     -> return (UserInput txt)
+    listT eventIn = case eventIn of
+        Startup    -> return (OtherOut Startup)
+        OtherIn t  -> hoist (zoom buffer . readOnly) (handleToken t)
+        Line   txt -> return (OtherOut (Line txt))
+        Prompt txt -> Select $ do
+            yield (OtherOut (Prompt txt))
+            let prm' = S.fromList (T.unpack txt)
+            lift $ prompt .= prm'
+        Resize w h -> do
+            lift $ do
+                width  .= w
+                height .= h
+            mzero
 
 {- $partial
     These are for use in conjunction with the 'handles' function from the @mvc@
     library, in order to avoid a @lens@ dependency
 -}
 
--- | Raw terminal instructions
-_TerminalOutput :: EventOut -> Maybe TermOutput
-_TerminalOutput x = case x of
-    TerminalOutput y -> Just y
-    _                -> Nothing
+-- | Other output values
+_OtherOut :: EventOut a -> Maybe a
+_OtherOut x = case x of
+    OtherOut y -> Just y
+    _          -> Nothing
 
 -- | Lines fed to 'RCPL.readLine'
-_UserInput :: EventOut -> Maybe Text
+_UserInput :: EventOut a -> Maybe Text
 _UserInput x = case x of
     UserInput y -> Just y
     _           -> Nothing
 
 -- | Console shutdown
-_Done :: EventOut -> Maybe ()
+_Done :: EventOut a -> Maybe ()
 _Done x = case x of
     Done -> Just ()
     _    -> Nothing

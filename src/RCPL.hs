@@ -26,7 +26,7 @@ import Data.Text (Text)
 import MVC
 
 import RCPL.Status (Status(..), initialStatus)
-import RCPL.Terminal (Term(..), term)
+import RCPL.Terminal (Term(..), TermOutput, term)
 import RCPL.Core
 
 -- TODO: Handle characters that are not 1-column wide
@@ -52,21 +52,21 @@ rcpl =
         let vSealAll :: View ()
             vSealAll = fromHandler $ \() -> sWrite *> sUserInput *> sChange
 
-            controller :: Controller EventIn
+            controller :: Controller (EventIn Char)
             controller = mconcat
-                [ Other   <$> cTermIn
+                [ OtherIn <$> cTermIn
                 , Line    <$> cWrite
                 , Prompt  <$> cChange
                 ]
     
-            model :: Model Status EventIn EventOut
+            model :: Model Status (EventIn Char) (EventOut TermOutput)
             model = rcplModel decoder_ encoder_
     
-            view :: View EventOut
+            view :: View (EventOut TermOutput)
             view = mconcat
-                [ handles _TerminalOutput vTermOut
-                , handles _UserInput      vUserInput
-                , handles _Done           vSealAll
+                [ handles _OtherOut  vTermOut
+                , handles _UserInput vUserInput
+                , handles _Done      vSealAll
                 ]
     
             io = runMVC controller model view initialStatus
