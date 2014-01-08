@@ -37,7 +37,7 @@ Library
         pipes-concurrency >= 2.1.0   && < 2.2,
         terminfo                        < 0.4,
         transformers      >= 0.2.0.0 && < 0.4,
-        text                            < 0.12
+        text                            < 1.1
     Exposed-Modules:
           RCPL
         , RCPL.Core
