@@ -20,8 +20,8 @@ module RCPL.Core (
 
 import Control.Applicative (liftA2)
 import Control.Monad (when)
-import Lens.Family (LensLike', Getting)
-import Lens.Family.State.Strict ((.=), (%=), use, uses)
+import Lens.Family (Getting)
+import Lens.Family.State.Strict ((.=), (%=), use)
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>), (<|), ViewR((:>)))
 import qualified Data.Sequence as S
@@ -77,7 +77,10 @@ dropEnd n s = S.take (S.length s - n) s
 
 -- Helper functions to remove code duplication
 
+lengthOf :: LensLike' (Getting (Seq Char)) Status (Seq Char) -> State Status Int
 lengthOf lens = fmap S.length (use lens)
+
+ofLines, ofChars :: Int -> Int -> Int
 ofLines = quot
 ofChars = rem
 
@@ -90,6 +93,9 @@ number metric lens = do
     len <- lengthOf lens
     return (metric len w)
 
+suffixCount
+    :: (LensLike' (Getting (Seq Char)) Status (Seq Char) -> State Status Int)
+    -> State Status Int
 suffixCount numberOfX =
     liftA2 (-) (numberOfX input) (numberOfX previous)
 
@@ -100,9 +106,9 @@ suffixCount numberOfX =
 clear
     :: LensLike' (Getting (Seq Char)) Status (Seq Char)
     -> Producer Command (State Status) ()
-clear buffer = do
-    bufLines <- lift $ number ofLines buffer
-    bufChars <- lift $ number ofChars buffer
+clear buffer_ = do
+    bufLines <- lift $ number ofLines buffer_
+    bufChars <- lift $ number ofChars buffer_
     each $  [CursorLeft bufChars, ClrEol]
         ++  (replicate bufLines () >> [CursorUp 1, ClrEol])
 
@@ -126,8 +132,8 @@ clearInput = do
 -- | Output the contents of the given buffer
 add :: LensLike' (Getting (Seq Char)) Status (Seq Char)
     -> Producer Command (State Status) ()
-add buffer = do
-    buf <- lift $ use buffer
+add buffer_ = do
+    buf <- lift $ use buffer_
     yield (InsertString $ toList buf)
 
 -- Restore the suffix, leaving the cursor where it began
