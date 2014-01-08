@@ -115,7 +115,7 @@ getDecoder :: Terminal -> Either String Decoder
 getDecoder t = Decoder
     <$> decode1 "key_home"  T.keyHome
     <*> decode1 "key_end"   T.keyEnd
-    <*> decode1 "key_left"  T.keyLeft
+    <*> pure "\b" -- decode1 "key_left"  T.keyLeft
     <*> decode1 "key_right" T.keyRight
     <*> pure "\DEL"
     <*> pure "\n"
@@ -146,14 +146,14 @@ data Token
 -- | Recognized input sequences
 tokens :: Decoder -> Map (Seq Char) Token
 tokens dec = M.fromList $ map (\(str, v) -> (S.fromList str, v))
-    [ (home   dec, Home      )
-    , (end    dec, End       )
-    , (left   dec, MoveLeft  )
-    , (right  dec, MoveRight )
-    , (delete dec, Delete    )
-    , (enter  dec, Enter     )
-    , (tab    dec, Tab       )
-    , ("\EOT"    , Exit      )
+    [ (home   dec, Home     )
+    , (end    dec, End      )
+    , (left   dec, MoveLeft )
+    , (right  dec, MoveRight)
+    , (delete dec, Delete   )
+    , (enter  dec, Enter    )
+    , (tab    dec, Tab      )
+    , ("\EOT"    , Exit     )
     ]
 
 isPrefixOf :: (Eq a) => Seq a -> Seq a -> Bool
@@ -186,13 +186,13 @@ decode dec c = Select $ do
 -- | The set of @terminfo@ commands that @rcpl@ requires
 data Encoder = Encoder
     { clrEol          ::        TermOutput
-    , cursorLeft      ::        TermOutput
-    , cursorUp        ::        TermOutput
     , deleteCharacter ::        TermOutput
-    , newline         ::        TermOutput
-    , parmLeftCursor  :: Int -> TermOutput
-    , parmRightCursor :: Int -> TermOutput
     , parmDch         :: Int -> TermOutput
+    , newline         ::        TermOutput
+    , cursorLeft      :: Int -> TermOutput
+    , cursorRight     :: Int -> TermOutput
+    , cursorUp        :: Int -> TermOutput
+    , cursorDown      :: Int -> TermOutput
     }
 
 note :: String -> Maybe a -> Either String a
@@ -209,19 +209,15 @@ getEncoder t =
             :: Maybe (Int -> TermOutput)
     in  Encoder
             <$> note "clr_eol"           (decode1  "el"  )
-            <*> note "cursor_left"       (decode1  "cub1")
-            <*> note "cursor_up"         (decode1  "cuu1")
             <*> note "delete_character"  (decode1  "dch1")
-            <*> note "newline"           (T.getCapability t T.newline)
-            <*> note "parm_left_cursor"  (decodeN  "cub" )
-            <*> note "parm_right_cursor" (decodeN  "cuf" )
             <*> note "parm_dch"          (decodeN  "dch" )
+            <*> note "newline"           (T.getCapability t T.newline  )
+            <*> note "cursorLeft"        (T.getCapability t T.moveLeft )
+            <*> note "cursorRight"       (T.getCapability t T.moveRight)
+            <*> note "cursorUp"          (T.getCapability t T.moveUp   )
+            <*> note "cursorDown"        (T.getCapability t T.moveDown )
 
-{-| Low-level description of console interactions
-
-    Each of these constructors has a one-to-one correspondence with a @terminfo@
-    capability.
--}
+-- | Low-level description of console interactions
 data Command
     -- Raw textual output
     = InsertString String
@@ -229,25 +225,25 @@ data Command
 
     -- Control commands
     | ClrEol
-    | CursorLeft
-    | CursorUp
     | DeleteCharacter
-    | Newline
-    | ParmLeftCursor Int
-    | ParmRightCursor Int
     | ParmDch Int
+    | Newline
+    | CursorLeft  Int
+    | CursorRight Int
+    | CursorUp    Int
+    | CursorDown  Int
     deriving (Eq, Show)
 
 -- | Convert a 'Command' to 'TermOutput'
 encode :: Encoder -> Command -> TermOutput
 encode t cmd = case cmd of
-    InsertString    str -> T.termText str
-    InsertChar      c   -> T.termText [c]
-    ClrEol              -> clrEol          t
-    CursorLeft          -> cursorLeft      t
-    CursorUp            -> cursorUp        t
-    DeleteCharacter     -> deleteCharacter t
-    Newline             -> newline         t
-    ParmLeftCursor  n   -> parmLeftCursor  t n
-    ParmRightCursor n   -> parmRightCursor t n
-    ParmDch         n   -> parmDch         t n
+    InsertString str -> T.termText str
+    InsertChar   c   -> T.termText [c]
+    ClrEol           -> clrEol          t
+    DeleteCharacter  -> deleteCharacter t
+    ParmDch   n      -> parmDch         t n
+    Newline          -> newline         t
+    CursorLeft  n    -> cursorLeft      t n
+    CursorRight n    -> cursorRight     t n
+    CursorUp    n    -> cursorUp        t n
+    CursorDown  n    -> cursorDown      t n

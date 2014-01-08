@@ -18,14 +18,17 @@ module RCPL.Core (
 
     ) where
 
+import Control.Applicative (liftA2)
 import Control.Monad (when)
-import Lens.Family.State.Strict ((.=), (%=), use)
+import Lens.Family (LensLike', Getting)
+import Lens.Family.State.Strict ((.=), (%=), use, uses)
 import Data.Foldable (toList)
-import Data.Sequence (Seq, (|>))
+import Data.Sequence (Seq, (|>), (<|), ViewR((:>)))
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import MVC
+import qualified Pipes.Prelude as P
 
 import RCPL.Status
 import RCPL.Terminal
@@ -72,76 +75,162 @@ dropEnd n s = S.take (S.length s - n) s
 
 -- TODO: Support Home/End/Tab
 
+-- Helper functions to remove code duplication
+
+lengthOf lens = fmap S.length (use lens)
+ofLines = quot
+ofChars = rem
+
+number
+    :: (Int -> Int -> Int)
+    -> LensLike' (Getting (Seq Char)) Status (Seq Char)
+    -> State Status Int
+number metric lens = do
+    w   <- use width
+    len <- lengthOf lens
+    return (metric len w)
+
+suffixCount numberOfX =
+    liftA2 (-) (numberOfX input) (numberOfX previous)
+
+{-| Clear everything to the left of the cursor and home the cursor
+
+    Works for 'prompt' and 'previous' buffers
+-}
+clear
+    :: LensLike' (Getting (Seq Char)) Status (Seq Char)
+    -> Producer Command (State Status) ()
+clear buffer = do
+    bufLines <- lift $ number ofLines buffer
+    bufChars <- lift $ number ofChars buffer
+    each $  [CursorLeft bufChars, ClrEol]
+        ++  (replicate bufLines () >> [CursorUp 1, ClrEol])
+
+-- | Clear the suffix, leaving the cursor where it began
+clearSuffix :: Producer Command (State Status) ()
+clearSuffix = do
+    suffLines <- lift $ suffixCount (number ofLines)
+    when (suffLines > 0) $ do
+        prevChars <- lift $ number ofChars previous
+        each $  [CursorLeft prevChars, CursorDown suffLines]
+            ++  (replicate suffLines () >> [ClrEol, CursorUp 1])
+            ++  [CursorRight prevChars]
+    yield ClrEol
+
+-- | Clear the input line, homing the cursor
+clearInput :: Producer Command (State Status) ()
+clearInput = do
+    clearSuffix
+    clear previous
+
+-- | Output the contents of the given buffer
+add :: LensLike' (Getting (Seq Char)) Status (Seq Char)
+    -> Producer Command (State Status) ()
+add buffer = do
+    buf <- lift $ use buffer
+    yield (InsertString $ toList buf)
+
+-- Restore the suffix, leaving the cursor where it began
+addSuffix :: Producer Command (State Status) ()
+addSuffix = do
+    suffLines <- lift $ suffixCount (number ofLines)
+    suffChars <- lift $ suffixCount (number ofChars)
+    add suffix
+    each $  [CursorUp suffLines]
+        ++  if (suffChars >= 0)
+            then [CursorLeft    suffChars ]
+            else [CursorRight (-suffChars)]
+
+addInput :: Producer Command (State Status) ()
+addInput = do
+    add previous
+    addSuffix
+
+backspace :: Producer Command (State Status) ()
+backspace = do
+    bufLen    <- lift $ lengthOf buffer
+    prevLines <- lift $ number ofLines previous
+    prevChars <- lift $ number ofChars previous
+    w         <- lift $ use width
+    let cmds | prevChars == 0 && prevLines > 0 =
+                 [CursorUp 1, CursorRight (w - 1)]
+             | bufLen > 0 = [CursorLeft 1]
+             | otherwise  = []
+    each cmds
+
 -- | Translates decoded input events to output events pre-encoding
 terminalDriver :: In Token -> ListT (State Status) (Out Command)
 terminalDriver cmd = Select $ do
-    buf <- lift $ use buffer
-    prm <- lift $ use prompt
-    w   <- lift $ use width
-    let bufTotal = prm <> buf
-        len = S.length bufTotal
-        (numLines, numChars) = quotRem len w
     case cmd of
-        Startup -> yield (Out $ InsertString $ toList prm)
+        Startup -> P.map Out <-< add prompt
 
-        Line txt -> do
-            let cmds =  [ParmLeftCursor numChars, ClrEol]
-                    ++  (replicate numLines () >> [CursorUp, ClrEol])
-                    ++  [InsertString (T.unpack txt)
-                        , Newline
-                        , InsertString (toList bufTotal)
-                        ]
-                    ++ if (numChars == 0 && numLines > 0) then [Newline] else []
-            each (map Out cmds)
+        Line txt -> P.map Out <-< (do
+            clearInput
+            each [InsertString (T.unpack txt), Newline]
+            -- TODO: Check the Newline
+            addInput
 
-        Prompt txt -> do
-            let prm' = S.fromList (T.unpack txt)
+            prevLines <- lift $ number ofLines previous
+            prevChars <- lift $ number ofChars previous
+            when (prevChars == 0 && prevLines > 0) $ yield Newline )
 
-            let cmds =
-                       [ParmLeftCursor numChars, ClrEol]
-                    ++ (replicate numLines () >> [CursorUp, ClrEol])
-                    ++ [InsertString $ toList $ prm' <> buf]
-            each (map Out cmds)
-
-            lift $ prompt .= prm'
+        Prompt txt -> P.map Out <-< (do
+            clearInput
+            lift $ prompt .= S.fromList (T.unpack txt)
+            addInput )
 
         Resize w' h' -> lift $ do
             width  .= w'
             height .= h'
 
-        In (Character c) -> do
-            let cmds = InsertChar c:if len + 1 == w then [Newline] else []
-            each (map Out cmds)
+        In (Character c) -> P.map Out <-< (do
+            -- TODO: This is probably wrong
+            prevLen  <- lift $ lengthOf previous
+            inputLen <- lift $ lengthOf input
+            w        <- lift $ use width
+            let prevLen' = prevLen + 1
 
-            lift $ buffer %= (|> c)
+            clearSuffix
+            yield (InsertChar c)
+            lift $ prefix %= (|> c)
+            addSuffix
+            -- TODO: This is probably wrong
+            when (prevLen' == w && inputLen == prevLen) $ yield Newline )
 
-        In Delete -> do
-            let cmds | numChars == 0 && numLines > 0 =
-                         [CursorUp, ParmRightCursor (w - 1), DeleteCharacter]
-                     | S.length buf > 0 = [CursorLeft, DeleteCharacter]
-                     | otherwise = []
-            each (map Out cmds)
+        In MoveLeft -> P.map Out <-< (do
+            pre <- lift $ use prefix
+            case S.viewr pre of
+                S.EmptyR  -> return ()
+                pr:>e     -> do
+                    backspace
+                    lift $ do
+                        prefix .= pr
+                        suffix %= (e <|) )
 
-            lift $ buffer %= dropEnd 1
+        In Delete -> P.map Out <-< (do
+            preLen <- lift $ lengthOf prefix
+            when (preLen > 0) $ do
+                clearSuffix
+                backspace
+                yield DeleteCharacter
+                lift $ prefix %= dropEnd 1
+                addSuffix )
 
         In Enter -> do
+            buf <- lift $ use buffer
             yield (UserInput $ T.pack $ toList buf)
+            P.map Out <-< (do
+                clearInput
+                lift $ do 
+                    prefix .= S.empty
+                    suffix .= S.empty
+                add prompt )
 
-            let cmds =
-                    [ParmLeftCursor numChars, ClrEol]
-                    ++ (replicate numLines () >> [CursorUp, ClrEol])
-                    ++ [InsertString (toList prm)]
-            each (map Out cmds)
-
-            lift $ buffer .= S.empty
-
-        In Exit -> when (S.length buf == 0) $ do
-            let prmLen = S.length prm
-
-            let cmds = [ParmLeftCursor prmLen, ParmDch prmLen]
-            each (map Out cmds)
-
-            yield Done
+        In Exit -> do
+            bufLen <- lift $ lengthOf buffer
+            when (bufLen == 0) $ do
+                P.map Out <-< clear prompt
+                yield Done
 
         -- TODO: Handle other tokens
         In _ -> return ()
