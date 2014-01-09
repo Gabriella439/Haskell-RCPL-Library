@@ -21,7 +21,7 @@ module RCPL.Core (
 import Control.Applicative (liftA2)
 import Control.Monad (when)
 import Lens.Family (Getting)
-import Lens.Family.State.Strict ((.=), (%=), use)
+import Lens.Family.State.Strict ((.=), (%=), (+=), (-=), use)
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>), (<|), ViewR((:>)))
 import qualified Data.Sequence as S
@@ -31,7 +31,7 @@ import MVC
 import qualified Pipes.Prelude as P
 
 import RCPL.Status
-import RCPL.Terminal
+import RCPL.Terminal hiding (cursorLeft, cursorRight, cursorUp, cursorDown)
 
 -- | Events entering the pure kernel
 data In a
@@ -55,6 +55,7 @@ data Out a
     -- ^ Line read from user input
     | Done
     -- ^ Session complete
+    deriving (Eq, Show)
 
 instance Functor Out where
     fmap f eventOut = case eventOut of
@@ -70,172 +71,184 @@ instance Functor Out where
     library using a 'Model' from the @mvc@ library
 -}
 
-dropEnd :: Int -> Seq a -> Seq a
-dropEnd n s = S.take (S.length s - n) s
-
 -- TODO: Support Home/End/Tab
 
--- Helper functions to remove code duplication
+cursorLeft  n = if n > 0 then [CursorLeft  n] else []
+cursorRight n = if n > 0 then [CursorRight n] else []
+cursorUp    n = if n > 0 then [CursorUp    n] else []
+cursorDown  n = if n > 0 then [CursorDown  n] else []
 
-lengthOf :: LensLike' (Getting (Seq Char)) Status (Seq Char) -> State Status Int
-lengthOf lens = fmap S.length (use lens)
+insertString str = case str of
+    [] -> []
+    _  -> [InsertString str]
 
-ofLines, ofChars :: Int -> Int -> Int
-ofLines = quot
-ofChars = rem
+insert :: String -> Producer Command (State Status) ()
+insert str = do
+    w <- lift (use width)
+    c <- lift (use column)
+    let len = length str
+        remainder = w - c
+    if len < remainder
+        then do
+            each (insertString str)
+            lift (column += len)
+        else do
+            let (prefix, suffix) = splitAt remainder str
+            each (insertString prefix ++ [Newline])
+            lift (column .= 0)
+            insert suffix
 
-number
-    :: (Int -> Int -> Int)
-    -> LensLike' (Getting (Seq Char)) Status (Seq Char)
-    -> State Status Int
-number metric lens = do
-    w   <- use width
-    len <- lengthOf lens
-    return (metric len w)
+{-| Delete a fixed number of characters to the left of the cursor, moving the
+    cursor to the beginning of the deleted characters.  This handles wrapping
+    around to the right when reaching the left column.
 
-suffixCount
-    :: (LensLike' (Getting (Seq Char)) Status (Seq Char) -> State Status Int)
-    -> State Status Int
-suffixCount numberOfX =
-    liftA2 (-) (numberOfX input) (numberOfX previous)
-
-{-| Clear everything to the left of the cursor and home the cursor
-
-    Works for 'prompt' and 'previous' buffers
+    For efficiency, this assumes that there are no characters to the right of
+    the cursor so that it can use 'ClrEol'
 -}
-clear
+delete :: Int -> Producer Command (State Status) ()
+delete n = do
+    w <- lift (use width)
+    c <- lift (use column)
+
+    if n <= c
+        then do
+            each (cursorLeft n ++ [ClrEol])
+            lift (column -= n)
+        else if (n < c + w)
+        then do
+            let c' = c + w - n
+            -- TODO: Use 'Home' instead of 'CursorLeft c', if possible
+            each (  cursorLeft c
+                ++ [ClrEol]
+                ++ cursorUp 1
+                ++ cursorRight c'
+                ++ [ClrEol] )
+            lift (column .= c')
+        else do
+            -- TODO: Use 'Home' instead of 'CursorLeft c', if possible
+            each (cursorLeft c ++ [ClrEol] ++ cursorUp 1 ++ [ClrEol])
+            lift (column .= 0)
+            delete (n - c - w)
+
+{-| Move the cursor left a fixed number of characters.  This handles wrapping
+    around to the right when reaching the left column.
+-}
+moveLeft :: Int -> Producer Command (State Status) ()
+moveLeft n = do
+    w <- lift (use width)
+    c <- lift (use column)
+
+    let (q, r) = quotRem n w
+    let upDisplacement   = q + if r > c then 1 else 0
+        leftDisplacement = r - if r > c then w else 0
+    each ( cursorUp upDisplacement
+        ++ if leftDisplacement >= 0
+           then cursorLeft    leftDisplacement
+           else cursorRight (-leftDisplacement) )
+    lift $ column -= leftDisplacement
+
+{-| Move the cursor right a fixed number of characters.  This handles wrapping
+    around to the left when reaching the right column.
+-}
+moveRight :: Int -> Producer Command (State Status) ()
+moveRight n = do
+    w <- lift (use width)
+    c <- lift (use column)
+    let c' = w - c
+
+    let (q, r) = quotRem n w
+    let downDisplacement  = q + if r >= c' then 1 else 0
+        rightDisplacement = r - if r >= c' then w else 0
+    each ( cursorDown downDisplacement
+        ++ if rightDisplacement >= 0
+           then cursorRight   rightDisplacement
+           else cursorLeft  (-rightDisplacement) )
+    lift $ column += rightDisplacement
+
+-- TODO: Figure out how to get `uses` to work
+lengthOf
     :: LensLike' (Getting (Seq Char)) Status (Seq Char)
-    -> Producer Command (State Status) ()
-clear buffer_ = do
-    bufLines <- lift $ number ofLines buffer_
-    bufChars <- lift $ number ofChars buffer_
-    each $  [CursorLeft bufChars, ClrEol]
-        ++  (replicate bufLines () >> [CursorUp 1, ClrEol])
+    -> Producer x (State Status) Int
+lengthOf getter = lift (fmap S.length (use getter))
 
--- | Clear the suffix, leaving the cursor where it began
-clearSuffix :: Producer Command (State Status) ()
-clearSuffix = do
-    suffLines <- lift $ suffixCount (number ofLines)
-    when (suffLines > 0) $ do
-        prevChars <- lift $ number ofChars previous
-        each $  [CursorLeft prevChars, CursorDown suffLines]
-            ++  (replicate suffLines () >> [ClrEol, CursorUp 1])
-            ++  [CursorRight prevChars]
-    yield ClrEol
-
--- | Clear the input line, homing the cursor
-clearInput :: Producer Command (State Status) ()
-clearInput = do
-    clearSuffix
-    clear previous
-
--- | Output the contents of the given buffer
-add :: LensLike' (Getting (Seq Char)) Status (Seq Char)
-    -> Producer Command (State Status) ()
-add buffer_ = do
-    buf <- lift $ use buffer_
-    yield (InsertString $ toList buf)
-
--- Restore the suffix, leaving the cursor where it began
-addSuffix :: Producer Command (State Status) ()
-addSuffix = do
-    suffLines <- lift $ suffixCount (number ofLines)
-    suffChars <- lift $ suffixCount (number ofChars)
-    add suffix
-    each $  [CursorUp suffLines]
-        ++  if (suffChars >= 0)
-            then [CursorLeft    suffChars ]
-            else [CursorRight (-suffChars)]
-
-addInput :: Producer Command (State Status) ()
-addInput = do
-    add previous
-    addSuffix
-
-backspace :: Producer Command (State Status) ()
-backspace = do
-    bufLen    <- lift $ lengthOf buffer
-    prevLines <- lift $ number ofLines previous
-    prevChars <- lift $ number ofChars previous
-    w         <- lift $ use width
-    let cmds | prevChars == 0 && prevLines > 0 =
-                 [CursorUp 1, CursorRight (w - 1)]
-             | bufLen > 0 = [CursorLeft 1]
-             | otherwise  = []
-    each cmds
+-- TODO: Figure out how to get `uses` to work
+textOf
+    :: LensLike' (Getting (Seq Char)) Status (Seq Char)
+    -> Producer x (State Status) String
+textOf getter = lift (fmap toList (use getter))
 
 -- | Translates decoded input events to output events pre-encoding
 terminalDriver :: In Token -> ListT (State Status) (Out Command)
 terminalDriver cmd = Select $ do
     case cmd of
-        Startup -> P.map Out <-< add prompt
+        Startup -> P.map Out <-< (insert =<< textOf prompt)
 
         Line txt -> P.map Out <-< (do
-            clearInput
-            each [InsertString (T.unpack txt), Newline]
-            -- TODO: Check the Newline
-            addInput
-
-            prevLines <- lift $ number ofLines previous
-            prevChars <- lift $ number ofChars previous
-            when (prevChars == 0 && prevLines > 0) $ yield Newline )
+            moveRight =<< lengthOf suffix
+            delete    =<< lengthOf input
+            insert       (T.unpack txt)
+            c <- lift (use column)
+            when (c /= 0) $ do
+                yield Newline
+                lift $ column .= 0
+            insert    =<< textOf   input
+            moveLeft  =<< lengthOf suffix )
 
         Prompt txt -> P.map Out <-< (do
-            clearInput
+            moveRight =<< lengthOf suffix
+            delete    =<< lengthOf input
             lift $ prompt .= S.fromList (T.unpack txt)
-            addInput )
+            insert    =<< textOf   input
+            moveLeft  =<< lengthOf suffix )
 
         Resize w' h' -> lift $ do
             width  .= w'
             height .= h'
 
         In (Character c) -> P.map Out <-< (do
-            -- TODO: This is probably wrong
-            prevLen  <- lift $ lengthOf previous
-            inputLen <- lift $ lengthOf input
-            w        <- lift $ use width
-            let prevLen' = prevLen + 1
-
-            clearSuffix
-            yield (InsertChar c)
+            moveRight =<< lengthOf suffix
+            delete    =<< lengthOf suffix
+            insert [c]
             lift $ prefix %= (|> c)
-            addSuffix
-            -- TODO: This is probably wrong
-            when (prevLen' == w && inputLen == prevLen) $ yield Newline )
+            insert    =<< textOf   suffix
+            moveLeft  =<< lengthOf suffix )
 
         In MoveLeft -> P.map Out <-< (do
-            pre <- lift $ use prefix
+            pre <- lift (use prefix)
             case S.viewr pre of
-                S.EmptyR  -> return ()
-                pr:>e     -> do
-                    backspace
+                S.EmptyR -> return ()
+                pr:>e    -> do
+                    moveLeft 1
                     lift $ do
                         prefix .= pr
                         suffix %= (e <|) )
 
         In Delete -> P.map Out <-< (do
-            preLen <- lift $ lengthOf prefix
-            when (preLen > 0) $ do
-                clearSuffix
-                backspace
-                yield DeleteCharacter
-                lift $ prefix %= dropEnd 1
-                addSuffix )
+            pre <- lift (use prefix)
+            case S.viewr pre of
+                S.EmptyR -> return ()
+                pr:>_    -> do
+                    moveRight =<< lengthOf suffix
+                    delete    =<< lengthOf suffix
+                    delete 1
+                    lift $ prefix .= pr
+                    insert    =<< textOf   suffix
+                    moveLeft  =<< lengthOf suffix )
 
         In Enter -> do
-            buf <- lift $ use buffer
-            yield (UserInput $ T.pack $ toList buf)
+            buf <- textOf buffer
             P.map Out <-< (do
-                clearInput
-                lift $ do 
-                    prefix .= S.empty
-                    suffix .= S.empty
-                add prompt )
+                moveRight =<< lengthOf suffix
+                delete    =<< lengthOf buffer )
+            lift $ do 
+                prefix .= S.empty
+                suffix .= S.empty
+            yield (UserInput $ T.pack $ toList buf)
 
         In Exit -> do
-            bufLen <- lift $ lengthOf buffer
+            bufLen <- lengthOf buffer
             when (bufLen == 0) $ do
-                P.map Out <-< clear prompt
+                P.map Out <-< (delete =<< lengthOf prompt)
                 yield Done
 
         -- TODO: Handle other tokens

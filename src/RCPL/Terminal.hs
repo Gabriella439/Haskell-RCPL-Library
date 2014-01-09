@@ -101,13 +101,13 @@ keys = fromProducer Unbounded go
 
 -- | Special terminal keys that we need to detect
 data Decoder = Decoder 
-    { home   :: String
-    , end    :: String
-    , left   :: String
-    , right  :: String
-    , delete :: String
-    , enter  :: String
-    , tab    :: String
+    { _home   :: String
+    , _end    :: String
+    , _left   :: String
+    , _right  :: String
+    , _delete :: String
+    , _enter  :: String
+    , _tab    :: String
     }
 
 -- | Detect all special keys or die trying
@@ -146,14 +146,14 @@ data Token
 -- | Recognized input sequences
 tokens :: Decoder -> Map (Seq Char) Token
 tokens dec = M.fromList $ map (\(str, v) -> (S.fromList str, v))
-    [ (home   dec, Home     )
-    , (end    dec, End      )
-    , (left   dec, MoveLeft )
-    , (right  dec, MoveRight)
-    , (delete dec, Delete   )
-    , (enter  dec, Enter    )
-    , (tab    dec, Tab      )
-    , ("\EOT"    , Exit     )
+    [ (_home   dec, Home     )
+    , (_end    dec, End      )
+    , (_left   dec, MoveLeft )
+    , (_right  dec, MoveRight)
+    , (_delete dec, Delete   )
+    , (_enter  dec, Enter    )
+    , (_tab    dec, Tab      )
+    , ("\EOT"     , Exit     )
     ]
 
 isPrefixOf :: (Eq a) => Seq a -> Seq a -> Bool
