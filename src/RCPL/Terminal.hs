@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-| Terminal support
 
     This library uses the @terminfo@ library to convert 'Commands' to
@@ -6,15 +8,21 @@
 -}
 
 module RCPL.Terminal (
-    -- * Terminal
-      Term(..)
-    , term
-
     -- * Decoding
-    , Decoder(..)
+      Decoder(..)
     , Token(..)
     , decode
 
+    -- * Encoding
+    , Encoder(..)
+    , encoding
+
+    -- * Terminal
+    , Term(..)
+    , term
+    ) where
+
+{-
     -- * Encoding
     , Encoder(..)
     , Command(..)
@@ -23,18 +31,220 @@ module RCPL.Terminal (
     -- * Re-exports
     , TermOutput
     ) where
+-}
 
-import Control.Applicative ((<*>), (*>), (<*), pure, liftA2)
+import Control.Applicative ((<$>), (<*>), (*>), (<*), liftA2)
 import Control.Exception (bracket)
 import Control.Monad (unless)
-import System.Console.Terminfo (TermOutput, Terminal)
-import Data.Map (Map)
+import Data.Foldable (toList)
 import qualified Data.Map as M
-import Data.Sequence (Seq, (|>), ViewL((:<)))
+import Data.Sequence (Seq, ViewL((:<)), (|>), fromList)
 import qualified Data.Sequence as S
-import qualified System.Console.Terminfo as T
+import Data.Text (Text, pack, unpack, intercalate, isPrefixOf)
 import MVC
+import RCPL.Terminal.Feature
+import qualified RCPL.Terminal.Feature as F
+import System.Console.Terminfo
 import qualified System.IO as IO
+
+data Decoder = Decoder 
+    { home       :: Text
+    , end        :: Text
+    , arrowLeft  :: Text
+    , arrowRight :: Text
+    , arrowDown  :: Text
+    , arrowUp    :: Text
+    , backspace  :: Text
+    , delete     :: Text
+    , enter      :: Text
+    , tab        :: Text
+    }
+
+decoding :: Feature Decoder
+decoding = Decoder
+    <$> feature1' "khome"
+    <*> feature1' "kend"
+    <*> feature1' "kcub1"
+    <*> feature1' "kcuf1"
+    <*> feature1' "kcud1"
+    <*> feature1' "kcuu1"
+    <*> feature1' "kbs"
+    <*> feature1' "kdch1"
+    <*> feature1' "kent"
+    <*> feature1' "ht"
+  where
+    feature1' = fmap pack . feature1
+
+{-| An input token which may correspond to more than one character
+
+    Each of these constructors has a one-to-one correspondence with a key
+    recognized by @terminfo@, with the exception of 'Exit'
+-}
+data Token
+    = Character Char
+    | Home
+    | End
+    | ArrowLeft
+    | ArrowRight
+    | ArrowDown
+    | ArrowUp
+    | Delete
+    | Enter
+    | Tab
+    | Exit
+    deriving (Eq, Show)
+
+-- | Convert a stream of 'Char's to 'Token's using a state machine
+decode :: Decoder -> Char -> ListT (State (Seq Char)) Token
+decode dec c = Select $ do
+    seq <- lift get
+    loop (seq |> c)
+  where
+    tokens = M.fromList $
+        [ (home       dec, Home      )
+        , (end        dec, End       )
+        , (arrowLeft  dec, ArrowLeft )
+        , (arrowRight dec, ArrowRight)
+        , (arrowUp    dec, ArrowUp   )
+        , (arrowDown  dec, ArrowDown )
+        , (delete     dec, Delete    )
+        , (enter      dec, Enter     )
+        , (tab        dec, Tab       )
+        , ("\EOT"        , Exit      )
+        ]
+    loop seq = do
+        let txt = pack (toList seq)
+        if any (txt `isPrefixOf`) (M.keys tokens)
+            then case M.lookup txt tokens of
+                Nothing -> lift $ put $ fromList (unpack txt)
+                Just t  -> do
+                    lift $ put S.empty
+                    yield t
+            else case S.viewl seq of
+                S.EmptyL -> return ()
+                s:<eq    -> do
+                    yield (Character s)
+                    loop eq
+
+data Encoder = Encoder
+    { encodeInsertion :: EncodeInsertion
+    , encodeDeletion  :: EncodeDeletion
+    , encodeMotion    :: EncodeMotion
+    }
+
+encoding :: Feature Encoder
+encoding = Encoder <$> insertion <*> deletion <*> motion
+
+data Disabled
+
+disabled :: Disabled -> a
+disabled _ = error "disabled: Impossible state"
+
+data ModeEnabled = EnterMode | ExitMode
+
+data Axis = Row | Column
+
+data AxisAddressEnabled = Address Axis Int
+
+data Command a b c
+    -- Insertion commands
+    = InsertMode a
+    | InsertText Text
+
+    -- Deletion commands
+    | DeleteMode b
+    | DeleteN Int
+
+    -- Motion commands
+    | CursorAddress Int Int
+    | AxisAddress c
+    | CursorLeft
+    | CursorRight
+    | CursorUp
+    | CursorDown
+    deriving (Eq, Show)
+
+data MaybeInsertMode f b c
+    = InsertModeDisabled (f Disabled    b c)
+    | InsertModeEnabled  (f ModeEnabled b c)
+
+data MaybeDeleteMode f c
+    = DeleteModeDisabled (f Disabled    c)
+    | DeleteModeEnabled  (f ModeEnabled c)
+
+data MaybeAxisAddress f
+    = AxisAddressDisabled (f Disabled          )
+    | AxisAddressEnabled  (f AxisAddressEnabled)
+
+newtype EncodeCommand a b c
+    = EncodeCommand { encodeCommand :: Command a b c -> TermOutput }
+
+encode
+    :: Encoder
+    -> MaybeAxisAddress (MaybeDeleteMode (MaybeInsertMode EncodeCommand))
+encode enc = testAxisAddress
+  where
+    testAxisAddress
+        :: MaybeAxisAddress (MaybeDeleteMode (MaybeInsertMode EncodeCommand))
+    testAxisAddress = case axisAddress (encodeMotion enc) of
+        Nothing   -> AxisAddressDisabled (testDeleteMode disabled         )
+        Just enc' -> AxisAddressEnabled  (testDeleteMode encodeAxisAddress)
+          where
+            encodeAxisAddress (Address axis n) = case axis of
+                Row    -> column_address enc' n 
+                Column -> row_address    enc' n
+
+    testDeleteMode
+        :: (c -> TermOutput)
+        -> MaybeDeleteMode (MaybeInsertMode EncodeCommand) c
+    testDeleteMode encodeAxisAddress = case deleteMode (encodeDeletion enc) of
+        Nothing   -> DeleteModeDisabled $
+            testInsertMode encodeAxisAddress disabled
+        Just enc' -> DeleteModeEnabled  $
+            testInsertMode encodeAxisAddress encodeDeleteMode
+          where
+            encodeDeleteMode x = case x of
+                EnterMode -> enter_delete_mode enc'
+                ExitMode  -> exit_delete_mode  enc'
+
+    testInsertMode
+        :: (c -> TermOutput)
+        -> (b -> TermOutput)
+        -> MaybeInsertMode EncodeCommand b c
+    testInsertMode encodeAxisAddress encodeDeleteMode =
+        case insertMode (encodeInsertion enc) of
+            Nothing   -> InsertModeDisabled $
+                encodeCmd encodeAxisAddress encodeDeleteMode disabled
+            Just enc' -> InsertModeEnabled  $
+                encodeCmd encodeAxisAddress encodeDeleteMode encodeInsertMode
+              where
+                encodeInsertMode x = case x of
+                    EnterMode -> enter_insert_mode enc'
+                    ExitMode  -> exit_insert_mode  enc'
+
+    encodeCmd
+        :: (c -> TermOutput)
+        -> (b -> TermOutput)
+        -> (a -> TermOutput)
+        -> EncodeCommand a b c
+    encodeCmd encodeAxisAddress encodeDeleteMode encodeInsertMode =
+        EncodeCommand $ \cmd -> case cmd of
+            InsertMode a          -> encodeInsertMode a
+            InsertText txt        -> insertText encInsertion txt
+            DeleteMode b          -> encodeDeleteMode b
+            DeleteN n             -> deleteN encDeletion n
+            CursorAddress row col -> cursor_address encMotion row col
+            AxisAddress c         -> encodeAxisAddress c
+            CursorLeft            -> cursor_left  encMotion
+            CursorRight           -> cursor_right encMotion
+            CursorUp              -> cursor_up    encMotion
+            CursorDown            -> cursor_down  encMotion
+      where
+        encInsertion = encodeInsertion enc
+        encDeletion  = encodeDeletion enc
+        encMotion    = encodeMotion   enc
+                
+-- TODO: Get starting terminal size from terminfo
 
 -- | Data structure used to decode 'Terminal' input and encode 'Terminal' output
 data Term = Term
@@ -71,23 +281,6 @@ noEcho = manage $ bracket setEcho restoreEcho
     restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
     -- TODO: Figure out why this doesn't work
 
-{-| A 'Managed' pseudo-handle to the terminal
-
-    'term' throws an 'IOException' if the terminal does not support a command
-    necessary for terminal interaction
--}
-term :: Managed Term
-term =
-    manage    $ \k -> do
-    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \termIn_ -> do
-        terminal <- T.setupTermFromEnv
-        (decoder_, encoder_) <-
-            case liftA2 (,) (getDecoder terminal) (getEncoder terminal) of
-                Left  str -> ioError (userError str)
-                Right x-> return  x
-        let termOut_ = fromHandler (T.runTermOutput terminal)
-        k (Term termIn_ decoder_ encoder_ termOut_)
-
 -- | Read key presses from stdin
 keys :: Managed (Controller Char)
 keys = fromProducer Unbounded go
@@ -99,151 +292,21 @@ keys = fromProducer Unbounded go
             yield c
             go
 
--- | Special terminal keys that we need to detect
-data Decoder = Decoder 
-    { _home   :: String
-    , _end    :: String
-    , _left   :: String
-    , _right  :: String
-    , _delete :: String
-    , _enter  :: String
-    , _tab    :: String
-    }
+{-| A 'Managed' pseudo-handle to the terminal
 
--- | Detect all special keys or die trying
-getDecoder :: Terminal -> Either String Decoder
-getDecoder t = Decoder
-    <$> decode1 "key_home"  T.keyHome
-    <*> decode1 "key_end"   T.keyEnd
-    <*> pure "\b" -- decode1 "key_left"  T.keyLeft
-    <*> decode1 "key_right" T.keyRight
-    <*> pure "\DEL"
-    <*> pure "\n"
-    <*> pure "\t"
-  where
-    decode1 str c = case T.getCapability t c of
-        Nothing -> Left ("getDecoder: " ++ str ++ " does not exist")
-        Just a  -> Right a
-
-{-| An input token which may correspond to more than one character
-
-    Each of these constructors has a one-to-one correspondence with a key
-    recognized by @terminfo@, although some key translations may be overriden by
-    @rcpl@
+    'term' throws an 'IOException' if the terminal does not support a command
+    necessary for terminal interaction
 -}
-data Token
-    = Character Char
-    | Home
-    | End
-    | MoveLeft
-    | MoveRight
-    | Delete
-    | Enter
-    | Tab
-    | Exit
-    deriving (Eq, Show)
-
--- | Recognized input sequences
-tokens :: Decoder -> Map (Seq Char) Token
-tokens dec = M.fromList $ map (\(str, v) -> (S.fromList str, v))
-    [ (_home   dec, Home     )
-    , (_end    dec, End      )
-    , (_left   dec, MoveLeft )
-    , (_right  dec, MoveRight)
-    , (_delete dec, Delete   )
-    , (_enter  dec, Enter    )
-    , (_tab    dec, Tab      )
-    , ("\EOT"     , Exit     )
-    ]
-
-isPrefixOf :: (Eq a) => Seq a -> Seq a -> Bool
-isPrefixOf s1 s2 = case S.viewl s1 of
-    S.EmptyL -> True
-    x:<s1'   -> case S.viewl s2 of
-        S.EmptyL -> False
-        y:<s2'   -> x == y && isPrefixOf s1' s2'
-
--- | Convert a stream of 'Char's to 'Token's using a state machine
-decode :: Decoder -> Char -> ListT (State (Seq Char)) Token
-decode dec c = Select $ do
-    str <- lift $ get
-    let str' = str |> c
-    loop str'
-  where
-    loop str =
-        if any (str `isPrefixOf`) (M.keys (tokens dec))
-        then case M.lookup str (tokens dec) of
-            Nothing -> lift $ put str
-            Just t  -> do
-                lift $ put S.empty
-                yield t
-        else case S.viewl str of
-            S.EmptyL -> return ()
-            s:<tr    -> do
-                yield (Character s)
-                loop tr
-
--- | The set of @terminfo@ commands that @rcpl@ requires
-data Encoder = Encoder
-    { clrEol          ::        TermOutput
-    , deleteCharacter ::        TermOutput
-    , parmDch         :: Int -> TermOutput
-    , newline         ::        TermOutput
-    , cursorLeft      :: Int -> TermOutput
-    , cursorRight     :: Int -> TermOutput
-    , cursorUp        :: Int -> TermOutput
-    , cursorDown      :: Int -> TermOutput
-    }
-
-note :: String -> Maybe a -> Either String a
-note str m = case m of
-    Nothing -> Left  ("getEncoder: " ++ str ++ " does not exist")
-    Just a  -> Right a
-
--- | Get all necessary terminal operations or die trying
-getEncoder :: Terminal -> Either String Encoder
-getEncoder t =
-    let decode1 str  = T.getCapability t (T.tiGetOutput1 str)
-            :: Maybe TermOutput
-        decodeN  str = T.getCapability t (T.tiGetOutput1 str)
-            :: Maybe (Int -> TermOutput)
-    in  Encoder
-            <$> note "clr_eol"           (decode1  "el"  )
-            <*> note "delete_character"  (decode1  "dch1")
-            <*> note "parm_dch"          (decodeN  "dch" )
-            <*> note "newline"           (T.getCapability t T.newline  )
-            <*> note "cursorLeft"        (T.getCapability t T.moveLeft )
-            <*> note "cursorRight"       (T.getCapability t T.moveRight)
-            <*> note "cursorUp"          (T.getCapability t T.moveUp   )
-            <*> note "cursorDown"        (T.getCapability t T.moveDown )
-
--- | Low-level description of console interactions
-data Command
-    -- Raw textual output
-    = InsertString String
-    | InsertChar Char
-
-    -- Control commands
-    | ClrEol
-    | DeleteCharacter
-    | ParmDch Int
-    | Newline
-    | CursorLeft  Int
-    | CursorRight Int
-    | CursorUp    Int
-    | CursorDown  Int
-    deriving (Eq, Show)
-
--- | Convert a 'Command' to 'TermOutput'
-encode :: Encoder -> Command -> TermOutput
-encode t cmd = case cmd of
-    InsertString str -> T.termText str
-    InsertChar   c   -> T.termText [c]
-    ClrEol           -> clrEol          t
-    DeleteCharacter  -> deleteCharacter t
-    ParmDch   n      -> parmDch         t n
-    Newline          -> newline         t
-    CursorLeft  n    -> cursorLeft      t n
-    CursorRight n    -> cursorRight     t n
-    CursorUp    n    -> cursorUp        t n
-    CursorDown  n    -> cursorDown      t n
+term :: Managed Term
+term =
+    manage $ \k -> do
+    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \termIn_ -> do
+        terminal <- setupTermFromEnv
+        let x = runFeature (liftA2 (,) decoding encoding) terminal
+        (decoder_, encoder_) <- case x of
+            Supported   y    -> return y
+            Unsupported txts -> ioError $ userError $
+                "term: Your terminal must support one of the following \
+                \commands: " ++ unpack (intercalate ", " txts)
+        let termOut_ = fromHandler (runTermOutput terminal)
+        k (Term termIn_ decoder_ encoder_ termOut_)
