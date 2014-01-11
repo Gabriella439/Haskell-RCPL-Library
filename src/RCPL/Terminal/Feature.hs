@@ -13,7 +13,6 @@ module RCPL.Terminal.Feature (
 
     -- * Feature detection
     , feature
-    , feature1
 
     -- * Features
     -- ** Insertion
@@ -31,6 +30,10 @@ module RCPL.Terminal.Feature (
     , EncodeMotion(..)
     , EncodeAxisAddress(..)
     , motion
+
+    -- ** Scrolling
+    , EncodeScrolling(..)
+    , scrolling
     ) where
 
 import Control.Applicative (Applicative(..), Alternative(..), (<$>), optional)
@@ -40,6 +43,8 @@ import Data.Monoid ((<>))
 import Data.Text (Text, unpack)
 import qualified Data.Text as T
 import System.Console.Terminfo
+
+-- TODO: Add support for padding?
 
 data Supports a = Unsupported [Text] | Supported a
 
@@ -93,16 +98,9 @@ instance MonadPlus Feature where
     mzero = Feature (\_ -> empty)
     mplus m1 m2 = Feature (\t -> mplus (runFeature m1 t) (runFeature m2 t))
 
--- | Like `tiGetOutput`, except extended with an error message
-feature :: Text -> Feature ([Int] -> LinesAffected -> TermOutput)
-feature featureName = Feature $ \terminal -> do
-    case getCapability terminal (tiGetOutput (unpack featureName)) of
-        Nothing -> Unsupported [featureName]
-        Just f  -> Supported f
-
 -- | Like `tiGetOutput1`, except extended with an error message
-feature1 :: OutputCap a => Text -> Feature a
-feature1 featureName = Feature $ \terminal -> do
+feature :: OutputCap a => Text -> Feature a
+feature featureName = Feature $ \terminal -> do
     case getCapability terminal (tiGetOutput1 (unpack featureName)) of
         Nothing -> Unsupported [featureName]
         Just f  -> Supported f
@@ -146,15 +144,15 @@ insertion :: Feature EncodeInsertion
 insertion = approach1 <|> approach2
   where
     approach1 = do
-        ich <- feature1 "ich"
+        ich <- feature "ich"
         return $ EncodeInsertion Nothing $ \txt ->
             ich (T.length txt) <> termText (unpack txt)
 
     approach2 = do
         im <- optional $
-            EncodeInsertMode <$> feature1 "smir" <*> feature1 "rmir"
-        ich1 <- feature1 "ich1" <|> pure mempty
-        ip   <- feature1 "ip"   <|> pure mempty
+            EncodeInsertMode <$> feature "smir" <*> feature "rmir"
+        ich1 <- feature "ich1" <|> pure mempty
+        ip   <- feature "ip"   <|> pure mempty
         return $ EncodeInsertion im $ \txt ->
              foldMap (\c -> ich1 <> termText [c] <> ip) (unpack txt)
 
@@ -175,13 +173,13 @@ deletion :: Feature EncodeDeletion
 deletion = approach1 <|> approach2
   where
     approach1 = do
-        dch <- feature1 "dch"
+        dch <- feature "dch"
         return $ EncodeDeletion Nothing dch
 
     approach2 = do
-        smdc <- feature1 "smdc"
-        rmdc <- feature1 "rmdc"
-        dch1 <- feature1 "dch1"
+        smdc <- feature "smdc"
+        rmdc <- feature "rmdc"
+        dch1 <- feature "dch1"
         return $ EncodeDeletion (Just (EncodeDeleteMode smdc rmdc)) $ \n ->
             mconcat (replicate n dch1)
 
@@ -203,9 +201,25 @@ data EncodeAxisAddress = EncodeAxisAddress
 
 motion :: Feature EncodeMotion
 motion = EncodeMotion
-    <$> feature1 "cup"
-    <*> optional (EncodeAxisAddress <$> feature1 "hpa" <*> feature1 "vpa")
-    <*> feature1 "cub1"
-    <*> feature1 "cuf1"
-    <*> feature1 "cuu1"
-    <*> feature1 "cud1"
+    <$> feature "cup"
+    <*> optional (EncodeAxisAddress <$> feature "hpa" <*> feature "vpa")
+    <*> feature "cub1"
+    <*> feature "cuf1"
+    <*> feature "cuu1"
+    <*> feature "cud1"
+
+
+data EncodeScrolling = EncodeScrolling
+    { scrollForwardN       :: Int -> TermOutput
+    , change_scroll_region :: Int -> Int -> TermOutput
+    }
+
+scrolling :: Feature EncodeScrolling
+scrolling = EncodeScrolling
+    <$> (approach1 <|> approach2)
+    <*> feature "cs"
+  where
+    approach1 = feature "indn"
+    approach2 = do
+        ind <- feature "ind"
+        return $ \n -> mconcat (replicate n ind)

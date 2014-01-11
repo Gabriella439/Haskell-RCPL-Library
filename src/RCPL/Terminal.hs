@@ -15,25 +15,18 @@ module RCPL.Terminal (
 
     -- * Encoding
     , Encoder(..)
-    , encoding
+    , MaybeInsertMode(..)
+    , MaybeDeleteMode(..)
+    , MaybeAxisAddress(..)
+    , EncodeCommand(..)
+    , encode
 
     -- * Terminal
     , Term(..)
     , term
     ) where
 
-{-
-    -- * Encoding
-    , Encoder(..)
-    , Command(..)
-    , encode
-
-    -- * Re-exports
-    , TermOutput
-    ) where
--}
-
-import Control.Applicative ((<$>), (<*>), (*>), (<*), liftA2)
+import Control.Applicative ((<*>), (*>), (<*), liftA2)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Foldable (toList)
@@ -43,7 +36,6 @@ import qualified Data.Sequence as S
 import Data.Text (Text, pack, unpack, intercalate, isPrefixOf)
 import MVC
 import RCPL.Terminal.Feature
-import qualified RCPL.Terminal.Feature as F
 import System.Console.Terminfo
 import qualified System.IO as IO
 
@@ -73,7 +65,7 @@ decoding = Decoder
     <*> feature1' "kent"
     <*> feature1' "ht"
   where
-    feature1' = fmap pack . feature1
+    feature1' = fmap pack . feature
 
 {-| An input token which may correspond to more than one character
 
@@ -97,8 +89,8 @@ data Token
 -- | Convert a stream of 'Char's to 'Token's using a state machine
 decode :: Decoder -> Char -> ListT (State (Seq Char)) Token
 decode dec c = Select $ do
-    seq <- lift get
-    loop (seq |> c)
+    seq' <- lift get
+    loop (seq' |> c)
   where
     tokens = M.fromList $
         [ (home       dec, Home      )
@@ -112,15 +104,15 @@ decode dec c = Select $ do
         , (tab        dec, Tab       )
         , ("\EOT"        , Exit      )
         ]
-    loop seq = do
-        let txt = pack (toList seq)
+    loop seq' = do
+        let txt = pack (toList seq')
         if any (txt `isPrefixOf`) (M.keys tokens)
             then case M.lookup txt tokens of
                 Nothing -> lift $ put $ fromList (unpack txt)
                 Just t  -> do
                     lift $ put S.empty
                     yield t
-            else case S.viewl seq of
+            else case S.viewl seq' of
                 S.EmptyL -> return ()
                 s:<eq    -> do
                     yield (Character s)
@@ -130,10 +122,11 @@ data Encoder = Encoder
     { encodeInsertion :: EncodeInsertion
     , encodeDeletion  :: EncodeDeletion
     , encodeMotion    :: EncodeMotion
+    , encodeScrolling :: EncodeScrolling
     }
 
 encoding :: Feature Encoder
-encoding = Encoder <$> insertion <*> deletion <*> motion
+encoding = Encoder <$> insertion <*> deletion <*> motion <*> scrolling
 
 data Disabled
 
@@ -147,21 +140,18 @@ data Axis = Row | Column
 data AxisAddressEnabled = Address Axis Int
 
 data Command a b c
-    -- Insertion commands
     = InsertMode a
     | InsertText Text
-
-    -- Deletion commands
     | DeleteMode b
     | DeleteN Int
-
-    -- Motion commands
     | CursorAddress Int Int
     | AxisAddress c
     | CursorLeft
     | CursorRight
     | CursorUp
     | CursorDown
+    | ScrollForwardN Int
+    | ChangeScrollRegion Int Int
     deriving (Eq, Show)
 
 data MaybeInsertMode f b c
@@ -229,20 +219,23 @@ encode enc = testAxisAddress
         -> EncodeCommand a b c
     encodeCmd encodeAxisAddress encodeDeleteMode encodeInsertMode =
         EncodeCommand $ \cmd -> case cmd of
-            InsertMode a          -> encodeInsertMode a
-            InsertText txt        -> insertText encInsertion txt
-            DeleteMode b          -> encodeDeleteMode b
-            DeleteN n             -> deleteN encDeletion n
-            CursorAddress row col -> cursor_address encMotion row col
-            AxisAddress c         -> encodeAxisAddress c
-            CursorLeft            -> cursor_left  encMotion
-            CursorRight           -> cursor_right encMotion
-            CursorUp              -> cursor_up    encMotion
-            CursorDown            -> cursor_down  encMotion
+            InsertMode a            -> encodeInsertMode a
+            InsertText txt          -> insertText encInsertion txt
+            DeleteMode b            -> encodeDeleteMode b
+            DeleteN n               -> deleteN encDeletion n
+            CursorAddress row_ col_ -> cursor_address encMotion row_ col_
+            AxisAddress c           -> encodeAxisAddress c
+            CursorLeft              -> cursor_left  encMotion
+            CursorRight             -> cursor_right encMotion
+            CursorUp                -> cursor_up    encMotion
+            CursorDown              -> cursor_down  encMotion
+            ScrollForwardN     m    -> scrollForwardN       encScrolling m
+            ChangeScrollRegion m n  -> change_scroll_region encScrolling m n
       where
         encInsertion = encodeInsertion enc
         encDeletion  = encodeDeletion enc
         encMotion    = encodeMotion   enc
+        encScrolling = encodeScrolling enc
                 
 -- TODO: Get starting terminal size from terminfo
 
