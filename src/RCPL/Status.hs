@@ -34,6 +34,7 @@ data Status = Status
     , _token  :: {-# UNPACK #-} !(Seq Char)
     , _width  :: {-# UNPACK #-} !Int
     , _height :: {-# UNPACK #-} !Int
+    , _row    :: {-# UNPACK #-} !Int
     , _column :: {-# UNPACK #-} !Int
     } deriving (Eq, Show)
 
@@ -66,6 +67,7 @@ initialStatus = Status
     , _token  = empty
     , _width  = 80
     , _height = 24
+    , _row    = 0
     , _column = 0
     }
 
@@ -76,48 +78,46 @@ initialStatus = Status
     
 -- | The prompt
 prompt :: (Functor f) => LensLike' f Status (Seq Char)
-prompt f (Status prm pre suf t w h c) =
-    fmap (\prm' -> Status prm' pre suf t w h c) (f prm)
+prompt f s = fmap (\x -> s { _prompt = x }) (f (_prompt s))
 {-# INLINABLe prompt #-}
 
 {-| Contents of the input buffer before the cursor (not including the character
     under the cursor
 -}
 prefix :: (Functor f) => LensLike' f Status (Seq Char)
-prefix f (Status prm pre suf t w h c) =
-    fmap (\pre' -> Status prm pre' suf t w h c) (f pre)
+prefix f s = fmap (\x -> s { _prefix = x }) (f (_prefix s))
 {-# INLINABLE prefix #-}
 
 {-| Contents of the input buffer after the cursor (including the character under
     the cursor
 -}
 suffix :: (Functor f) => LensLike' f Status (Seq Char)
-suffix f (Status prm pre suf t w h c) =
-    fmap (\suf' -> Status prm pre suf' t w h c) (f suf)
+suffix f s = fmap (\x -> s { _suffix = x }) (f (_suffix s))
 {-# INLINABLE suffix #-}
 
 -- | Undecoded input
 token :: (Functor f) => LensLike' f Status (Seq Char)
-token f (Status prm pre suf t w h c) =
-    fmap (\t' -> Status prm pre suf t' w h c) (f t)
+token f s = fmap (\x -> s { _token = x }) (f (_token s))
 {-# INLINABLE token #-}
 
 -- | Terminal width (columns)
 width :: (Functor f) => LensLike' f Status Int
-width f (Status prm pre suf t w h c) =
-    fmap (\w' -> Status prm pre suf t w' h c) (f w)
+width f s = fmap (\x -> s { _width = x }) (f (_width s))
 {-# INLINABLE width #-}
 
 -- | Terminal height (rows)
 height :: (Functor f) => LensLike' f Status Int
-height f (Status prm pre suf t w h c) =
-    fmap (\h' -> Status prm pre suf t w h' c) (f h)
+height f s = fmap (\x -> s { _height = x }) (f (_height s))
 {-# INLINABLE height #-}
+
+-- | Current row
+row :: (Functor f) => LensLike' f Status Int
+row f s = fmap (\x -> s { _row = x }) (f (_row s))
+{-# INLINABLE row #-}
 
 -- | Current column
 column :: (Functor f) => LensLike' f Status Int
-column f (Status prm pre suf t w h c) =
-    fmap (\c' -> Status prm pre suf t w h c') (f c)
+column f s = fmap (\x -> s { _column = x }) (f (_column s))
 {-# INLINABLE column #-}
 
 {-| Combines the prompt and prefix
