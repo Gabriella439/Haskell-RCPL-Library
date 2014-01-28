@@ -158,13 +158,13 @@ data MaybeInsertMode f b c
     = InsertModeDisabled (f Disabled    b c)
     | InsertModeEnabled  (f ModeEnabled b c)
 
-data MaybeDeleteMode f c
-    = DeleteModeDisabled (f Disabled    c)
-    | DeleteModeEnabled  (f ModeEnabled c)
+data MaybeDeleteMode fa c
+    = DeleteModeDisabled (fa Disabled    c)
+    | DeleteModeEnabled  (fa ModeEnabled c)
 
-data MaybeAxisAddress f
-    = AxisAddressDisabled (f Disabled          )
-    | AxisAddressEnabled  (f AxisAddressEnabled)
+data MaybeAxisAddress fab
+    = AxisAddressDisabled (fab Disabled          )
+    | AxisAddressEnabled  (fab AxisAddressEnabled)
 
 newtype EncodeCommand a b c
     = EncodeCommand { encodeCommand :: Command a b c -> TermOutput }
@@ -301,5 +301,5 @@ term =
             Unsupported txts -> ioError $ userError $
                 "term: Your terminal must support one of the following \
                 \commands: " ++ unpack (intercalate ", " txts)
-        let termOut_ = fromHandler (runTermOutput terminal)
+        let termOut_ = View (runTermOutput terminal)
         k (Term termIn_ decoder_ encoder_ termOut_)
