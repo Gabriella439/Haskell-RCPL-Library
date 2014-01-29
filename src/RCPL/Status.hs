@@ -13,6 +13,7 @@ module RCPL.Status (
     , token
     , width
     , height
+    , row
     , column
 
     -- * Getters
@@ -34,8 +35,6 @@ data Status = Status
     , _token  :: {-# UNPACK #-} !(Seq Char)
     , _width  :: {-# UNPACK #-} !Int
     , _height :: {-# UNPACK #-} !Int
-    , _row    :: {-# UNPACK #-} !Int
-    , _column :: {-# UNPACK #-} !Int
     } deriving (Eq, Show)
 
 -- TODO: Consider switching buffers to lists when possible
@@ -56,8 +55,6 @@ initialPrompt = fromList "> "
     * Width: 80 columns
 
     * Height: 24 rows
-
-    * Column: 0
 -}
 initialStatus :: Status
 initialStatus = Status
@@ -67,8 +64,6 @@ initialStatus = Status
     , _token  = empty
     , _width  = 80
     , _height = 24
-    , _row    = 0
-    , _column = 0
     }
 
 {- $lenses
@@ -111,13 +106,13 @@ height f s = fmap (\x -> s { _height = x }) (f (_height s))
 {-# INLINABLE height #-}
 
 -- | Current row
-row :: (Functor f) => LensLike' f Status Int
-row f s = fmap (\x -> s { _row = x }) (f (_row s))
+row :: LensLike' (Getting Int) Status Int
+row = to (\s -> S.length (view previous s) `quot` 80)
 {-# INLINABLE row #-}
 
 -- | Current column
-column :: (Functor f) => LensLike' f Status Int
-column f s = fmap (\x -> s { _column = x }) (f (_column s))
+column :: LensLike' (Getting Int) Status Int
+column = to (\s -> S.length (view previous s) `rem` 80)
 {-# INLINABLE column #-}
 
 {-| Combines the prompt and prefix
