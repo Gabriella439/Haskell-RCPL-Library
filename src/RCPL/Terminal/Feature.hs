@@ -17,22 +17,20 @@ module RCPL.Terminal.Feature (
     -- * Features
     -- ** Insertion
     -- $insertion
-    , EncodeInsertMode(..)
-    , EncodeInsertion(..)
+    , Insertion(..)
     , insertion
 
     -- ** Deletion
-    , EncodeDeleteMode(..)
-    , EncodeDeletion(..)
+    -- $deletion
+    , Deletion(..)
     , deletion
 
     -- ** Motion
-    , EncodeMotion(..)
-    , EncodeAxisAddress(..)
+    , Motion(..)
     , motion
 
     -- ** Scrolling
-    , EncodeScrolling(..)
+    , Scrolling(..)
     , scrolling
     ) where
 
@@ -128,94 +126,91 @@ feature featureName = Feature $ \terminal -> do
 -}
 
 -- | Insertion commands
-data EncodeInsertion = EncodeInsertion
-    { insertMode :: Maybe EncodeInsertMode
-    , insertText :: Text -> TermOutput
-    }
-
--- | Insert mode commands
-data EncodeInsertMode = EncodeInsertMode
+data Insertion = Insertion
     { enter_insert_mode :: TermOutput
     , exit_insert_mode  :: TermOutput
+    , insertText        :: Text -> TermOutput
     }
 
 -- | Character insertion support
-insertion :: Feature EncodeInsertion
+insertion :: Feature Insertion
 insertion = approach1 <|> approach2
   where
     approach1 = do
         ich <- feature "ich"
-        return $ EncodeInsertion Nothing $ \txt ->
+        return $ Insertion mempty mempty $ \txt ->
             ich (T.length txt) <> termText (unpack txt)
 
     approach2 = do
-        im <- optional $
-            EncodeInsertMode <$> feature "smir" <*> feature "rmir"
+        smir <- feature "smir" <|> pure mempty
+        rmir <- feature "rmir" <|> pure mempty
         ich1 <- feature "ich1" <|> pure mempty
         ip   <- feature "ip"   <|> pure mempty
-        return $ EncodeInsertion im $ \txt ->
+        return $ Insertion smir rmir $ \txt ->
              foldMap (\c -> ich1 <> termText [c] <> ip) (unpack txt)
 
--- | Deletion commands
-data EncodeDeletion = EncodeDeletion
-    { deleteMode :: Maybe EncodeDeleteMode
-    , deleteN    :: Int -> TermOutput
-    }
+{- $deletion
+    This section is based off of the following text from the @termcap@ manual,
+    translated to use @terminfo@ capability names:
 
--- | Delete mode commands
-data EncodeDeleteMode = EncodeDeleteMode
+> To delete `n` character positions, position the cursor and follow these
+> steps:
+>
+> 1. If the `dch` string is present, output it with parameter `n` and you are
+>    finished.  Otherwise, follow the remaining steps.
+> 2. Output the `smdc` string, ulness you know the terminal is already in delete
+>    mode.
+> 3. Output the `dch1` string `n` times
+> 4. Output the `rmdc` string eventually.  If the flag capability `mir` is
+>    present, you can move the cursor and do more deletion without leaving and
+>    reentering delete mode.
+-}
+
+-- | Deletion commands
+data Deletion = Deletion
     { enter_delete_mode :: TermOutput
     , exit_delete_mode  :: TermOutput
+    , deleteN           :: Int -> TermOutput
     }
 
 -- | Character deletion support
-deletion :: Feature EncodeDeletion
+deletion :: Feature Deletion
 deletion = approach1 <|> approach2
   where
     approach1 = do
         dch <- feature "dch"
-        return $ EncodeDeletion Nothing dch
+        return $ Deletion mempty mempty dch
 
     approach2 = do
         smdc <- feature "smdc"
         rmdc <- feature "rmdc"
         dch1 <- feature "dch1"
-        return $ EncodeDeletion (Just (EncodeDeleteMode smdc rmdc)) $ \n ->
-            mconcat (replicate n dch1)
+        return $ Deletion smdc rmdc $ \n -> mconcat (replicate n dch1)
 
 -- | Motion commands
-data EncodeMotion = EncodeMotion
+data Motion = Motion
     { cursor_address :: Int -> Int -> TermOutput
-    , axisAddress    :: Maybe EncodeAxisAddress
     , cursor_left    :: TermOutput
     , cursor_right   :: TermOutput
     , cursor_up      :: TermOutput
     , cursor_down    :: TermOutput
     }
 
--- | More efficient row\/column motions
-data EncodeAxisAddress = EncodeAxisAddress
-    { column_address :: Int -> TermOutput
-    , row_address    :: Int -> TermOutput
-    }
-
-motion :: Feature EncodeMotion
-motion = EncodeMotion
+motion :: Feature Motion
+motion = Motion
     <$> feature "cup"
-    <*> optional (EncodeAxisAddress <$> feature "hpa" <*> feature "vpa")
     <*> feature "cub1"
     <*> feature "cuf1"
     <*> feature "cuu1"
     <*> feature "cud1"
 
-
-data EncodeScrolling = EncodeScrolling
+data Scrolling = Scrolling
     { scrollForwardN       :: Int -> TermOutput
     , change_scroll_region :: Int -> Int -> TermOutput
     }
 
-scrolling :: Feature EncodeScrolling
-scrolling = EncodeScrolling
+scrolling :: Feature Scrolling
+scrolling = Scrolling
     <$> (approach1 <|> approach2)
     <*> feature "cs"
   where
