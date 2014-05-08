@@ -32,9 +32,13 @@ module RCPL.Terminal.Feature (
     -- ** Scrolling
     , Scrolling(..)
     , scrolling
+
+    -- ** Keys
+    , Keys(..)
+    , keys
     ) where
 
-import Control.Applicative (Applicative(..), Alternative(..), (<$>), optional)
+import Control.Applicative (Applicative(..), Alternative(..), (<$>))
 import Control.Monad (liftM, ap, MonadPlus(..))
 import Data.Foldable (foldMap)
 import Data.Monoid ((<>))
@@ -218,3 +222,29 @@ scrolling = Scrolling
     approach2 = do
         ind <- feature "ind"
         return $ \n -> mconcat (replicate n ind)
+
+data Keys = Keys
+    { home       :: String
+    , end        :: String
+    , arrowLeft  :: String
+    , arrowRight :: String
+    , arrowDown  :: String
+    , arrowUp    :: String
+    , backspace  :: String
+    , delete     :: String
+    , enter      :: String
+    , tab        :: String
+    }
+
+keys :: Feature Keys
+keys = Keys
+    <$> feature "khome"
+    <*> feature "kend"
+    <*> feature "kcub1"
+    <*> feature "kcuf1"
+    <*> feature "kcud1"
+    <*> feature "kcuu1"
+    <*> feature "kbs"
+    <*> feature "kdch1"
+    <*> feature "kent"
+    <*> feature "ht"

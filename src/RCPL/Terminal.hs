@@ -9,63 +9,31 @@
 
 module RCPL.Terminal (
     -- * Decoding
-      Decoder(..)
-    , Token(..)
-    , decode
+      Token(..)
+    , decodeToken
 
     -- * Encoding
-    , Encoder(..)
-    , MaybeInsertMode(..)
-    , MaybeDeleteMode(..)
-    , MaybeAxisAddress(..)
-    , EncodeCommand(..)
-    , encode
+    , Command(..)
+    , encodeCommand
 
     -- * Terminal
-    , Term(..)
     , term
     ) where
 
-import Control.Applicative ((<*>), (*>), (<*), liftA2)
+import Control.Applicative ((<*), liftA2)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Foldable (toList)
+import Data.List (isPrefixOf)
 import qualified Data.Map as M
-import Data.Sequence (Seq, ViewL((:<)), (|>), fromList)
+import Data.Sequence (ViewL((:<)), (|>))
 import qualified Data.Sequence as S
-import Data.Text (Text, pack, unpack, intercalate, isPrefixOf)
+import Data.Text (Text, intercalate, unpack)
 import MVC
+import MVC.Prelude (producer)
 import RCPL.Terminal.Feature
 import System.Console.Terminfo
 import qualified System.IO as IO
-
-data Decoder = Decoder 
-    { home       :: Text
-    , end        :: Text
-    , arrowLeft  :: Text
-    , arrowRight :: Text
-    , arrowDown  :: Text
-    , arrowUp    :: Text
-    , backspace  :: Text
-    , delete     :: Text
-    , enter      :: Text
-    , tab        :: Text
-    }
-
-decoding :: Feature Decoder
-decoding = Decoder
-    <$> feature1' "khome"
-    <*> feature1' "kend"
-    <*> feature1' "kcub1"
-    <*> feature1' "kcuf1"
-    <*> feature1' "kcud1"
-    <*> feature1' "kcuu1"
-    <*> feature1' "kbs"
-    <*> feature1' "kdch1"
-    <*> feature1' "kent"
-    <*> feature1' "ht"
-  where
-    feature1' = fmap pack . feature
 
 {-| An input token which may correspond to more than one character
 
@@ -86,66 +54,49 @@ data Token
     | Exit
     deriving (Eq, Show)
 
--- | Convert a stream of 'Char's to 'Token's using a state machine
-decode :: Decoder -> Char -> ListT (State (Seq Char)) Token
-decode dec c = Select $ do
-    seq' <- lift get
-    loop (seq' |> c)
-  where
-    tokens = M.fromList $
-        [ (home       dec, Home      )
-        , (end        dec, End       )
-        , (arrowLeft  dec, ArrowLeft )
-        , (arrowRight dec, ArrowRight)
-        , (arrowUp    dec, ArrowUp   )
-        , (arrowDown  dec, ArrowDown )
-        , (delete     dec, Delete    )
-        , (enter      dec, Enter     )
-        , (tab        dec, Tab       )
-        , ("\EOT"        , Exit      )
-        ]
-    loop seq' = do
-        let txt = pack (toList seq')
-        if any (txt `isPrefixOf`) (M.keys tokens)
-            then case M.lookup txt tokens of
-                Nothing -> lift $ put $ fromList (unpack txt)
-                Just t  -> do
-                    lift $ put S.empty
-                    yield t
-            else case S.viewl seq' of
-                S.EmptyL -> return ()
-                s:<eq    -> do
-                    yield (Character s)
-                    loop eq
+decodeToken :: Monad m => Feature (Pipe Char Token m ())
+decodeToken = do
+    _k <- keys
 
-data Encoder = Encoder
-    { encodeInsertion :: EncodeInsertion
-    , encodeDeletion  :: EncodeDeletion
-    , encodeMotion    :: EncodeMotion
-    , encodeScrolling :: EncodeScrolling
-    }
+    let tokens = M.fromList $
+            [ (home       _k, Home      )
+            , (end        _k, End       )
+            , (arrowLeft  _k, ArrowLeft )
+            , (arrowRight _k, ArrowRight)
+            , (arrowUp    _k, ArrowUp   )
+            , (arrowDown  _k, ArrowDown )
+            , (delete     _k, Delete    )
+            , (enter      _k, Enter     )
+            , (tab        _k, Tab       )
+            , ("\EOT"       , Exit      )
+            ]
 
-encoding :: Feature Encoder
-encoding = Encoder <$> insertion <*> deletion <*> motion <*> scrolling
+        go s = do
+            key <- await
+            let s' = s |> key
+            let str = toList s'
+            if any (str `isPrefixOf`) (M.keys tokens)
+                then case M.lookup str tokens of
+                    Nothing -> go s'
+                    Just t  -> do
+                        yield t
+                        go S.empty
+                else case S.viewl s' of
+                    S.EmptyL -> go s'
+                    c:<s''   -> do
+                        yield (Character c)
+                        go s''
 
-data Disabled
+    return (go S.empty)
 
-disabled :: Disabled -> a
-disabled _ = error "disabled: Impossible state"
-
-data ModeEnabled = EnterMode | ExitMode
-
-data Axis = Row | Column
-
-data AxisAddressEnabled = Address Axis Int
-
-data Command a b c
-    = InsertMode a
+data Command
+    = EnterInsertMode
+    | ExitInsertMode
     | InsertText Text
-    | DeleteMode b
+    | EnterDeleteMode
+    | ExitDeleteMode
     | DeleteN Int
     | CursorAddress Int Int
-    | AxisAddress c
     | CursorLeft
     | CursorRight
     | CursorUp
@@ -154,105 +105,37 @@ data Command a b c
     | ChangeScrollRegion Int Int
     deriving (Eq, Show)
 
-data MaybeInsertMode f b c
-    = InsertModeDisabled (f Disabled    b c)
-    | InsertModeEnabled  (f ModeEnabled b c)
+encodeCommand :: Feature (Command -> TermOutput)
+encodeCommand = do
+    _i <- insertion
+    _d <- deletion
+    _m <- motion
+    _s <- scrolling
+    return $ \cmd -> case cmd of
+        EnterInsertMode        -> enter_insert_mode _i
+        ExitInsertMode         -> exit_insert_mode _i
+        InsertText txt         -> insertText _i txt
+        EnterDeleteMode        -> enter_delete_mode _d
+        ExitDeleteMode         -> exit_delete_mode _d
+        DeleteN n              -> deleteN _d n
+        CursorAddress m n      -> cursor_address _m m n
+        CursorLeft             -> cursor_left _m
+        CursorRight            -> cursor_right _m
+        CursorUp               -> cursor_up _m
+        CursorDown             -> cursor_down _m
+        ScrollForwardN n       -> scrollForwardN _s n
+        ChangeScrollRegion m n -> change_scroll_region _s m n
 
-data MaybeDeleteMode fa c
-    = DeleteModeDisabled (fa Disabled    c)
-    | DeleteModeEnabled  (fa ModeEnabled c)
-
-data MaybeAxisAddress fab
-    = AxisAddressDisabled (fab Disabled          )
-    | AxisAddressEnabled  (fab AxisAddressEnabled)
-
-newtype EncodeCommand a b c
-    = EncodeCommand { encodeCommand :: Command a b c -> TermOutput }
-
-encode
-    :: Encoder
-    -> MaybeAxisAddress (MaybeDeleteMode (MaybeInsertMode EncodeCommand))
-encode enc = testAxisAddress
-  where
-    testAxisAddress
-        :: MaybeAxisAddress (MaybeDeleteMode (MaybeInsertMode EncodeCommand))
-    testAxisAddress = case axisAddress (encodeMotion enc) of
-        Nothing   -> AxisAddressDisabled (testDeleteMode disabled         )
-        Just enc' -> AxisAddressEnabled  (testDeleteMode encodeAxisAddress)
-          where
-            encodeAxisAddress (Address axis n) = case axis of
-                Row    -> column_address enc' n 
-                Column -> row_address    enc' n
-
-    testDeleteMode
-        :: (c -> TermOutput)
-        -> MaybeDeleteMode (MaybeInsertMode EncodeCommand) c
-    testDeleteMode encodeAxisAddress = case deleteMode (encodeDeletion enc) of
-        Nothing   -> DeleteModeDisabled $
-            testInsertMode encodeAxisAddress disabled
-        Just enc' -> DeleteModeEnabled  $
-            testInsertMode encodeAxisAddress encodeDeleteMode
-          where
-            encodeDeleteMode x = case x of
-                EnterMode -> enter_delete_mode enc'
-                ExitMode  -> exit_delete_mode  enc'
-
-    testInsertMode
-        :: (c -> TermOutput)
-        -> (b -> TermOutput)
-        -> MaybeInsertMode EncodeCommand b c
-    testInsertMode encodeAxisAddress encodeDeleteMode =
-        case insertMode (encodeInsertion enc) of
-            Nothing   -> InsertModeDisabled $
-                encodeCmd encodeAxisAddress encodeDeleteMode disabled
-            Just enc' -> InsertModeEnabled  $
-                encodeCmd encodeAxisAddress encodeDeleteMode encodeInsertMode
-              where
-                encodeInsertMode x = case x of
-                    EnterMode -> enter_insert_mode enc'
-                    ExitMode  -> exit_insert_mode  enc'
-
-    encodeCmd
-        :: (c -> TermOutput)
-        -> (b -> TermOutput)
-        -> (a -> TermOutput)
-        -> EncodeCommand a b c
-    encodeCmd encodeAxisAddress encodeDeleteMode encodeInsertMode =
-        EncodeCommand $ \cmd -> case cmd of
-            InsertMode a            -> encodeInsertMode a
-            InsertText txt          -> insertText encInsertion txt
-            DeleteMode b            -> encodeDeleteMode b
-            DeleteN n               -> deleteN encDeletion n
-            CursorAddress row_ col_ -> cursor_address encMotion row_ col_
-            AxisAddress c           -> encodeAxisAddress c
-            CursorLeft              -> cursor_left  encMotion
-            CursorRight             -> cursor_right encMotion
-            CursorUp                -> cursor_up    encMotion
-            CursorDown              -> cursor_down  encMotion
-            ScrollForwardN     m    -> scrollForwardN       encScrolling m
-            ChangeScrollRegion m n  -> change_scroll_region encScrolling m n
-      where
-        encInsertion = encodeInsertion enc
-        encDeletion  = encodeDeletion enc
-        encMotion    = encodeMotion   enc
-        encScrolling = encodeScrolling enc
-                
--- TODO: Get starting terminal size from terminfo
-
--- | Data structure used to decode 'Terminal' input and encode 'Terminal' output
-data Term = Term
-    { termIn  :: Controller Char
-      -- ^ Input stream of 'Char's
-    , decoder :: Decoder
-      -- ^ Used to convert 'Char's to 'Token's
-    , encoder :: Encoder
-      -- ^ Used to convert 'Command's to 'TermOutput'
-    , termOut :: View TermOutput
-      -- ^ Output stream of raw 'TermOutput'
-    }
+keyPresses :: Producer Char IO ()
+keyPresses = do
+    eof <- lift IO.isEOF
+    unless eof $ do
+        c <- lift getChar
+        yield c
+        keyPresses
 
 noBufferIn :: Managed IO.BufferMode
-noBufferIn = manage $ bracket setIn restoreIn
+noBufferIn = managed (bracket setIn restoreIn)
   where
     setIn =
         IO.hGetBuffering IO.stdin <* IO.hSetBuffering IO.stdin IO.NoBuffering
@@ -260,46 +143,38 @@ noBufferIn = manage $ bracket setIn restoreIn
     -- TODO: Figure out why this doesn't work
 
 noBufferOut :: Managed IO.BufferMode
-noBufferOut = manage $ bracket setOut restoreOut
+noBufferOut = managed (bracket setOut restoreOut)
   where
     setOut =
         IO.hGetBuffering IO.stdout <* IO.hSetBuffering IO.stdout IO.NoBuffering
     restoreOut o = IO.hSetBuffering IO.stdout o
 
 noEcho :: Managed Bool
-noEcho = manage $ bracket setEcho restoreEcho
+noEcho = managed (bracket setEcho restoreEcho)
   where
     setEcho =
         IO.hGetEcho IO.stdin <* IO.hSetEcho IO.stdin False
     restoreEcho _e = return () -- IO.hSetEcho IO.stdin e
     -- TODO: Figure out why this doesn't work
 
--- | Read key presses from stdin
-keys :: Managed (Controller Char)
-keys = fromProducer Unbounded go
-  where
-    go = do
-        eof <- lift IO.isEOF
-        unless eof $ do
-            c <- lift getChar
-            yield c
-            go
-
 {-| A 'Managed' pseudo-handle to the terminal
 
     'term' throws an 'IOException' if the terminal does not support a command
     necessary for terminal interaction
 -}
-term :: Managed Term
-term =
-    manage $ \k -> do
-    with (noBufferIn *> noBufferOut *> noEcho *> keys) $ \termIn_ -> do
-        terminal <- setupTermFromEnv
-        let x = runFeature (liftA2 (,) decoding encoding) terminal
-        (decoder_, encoder_) <- case x of
-            Supported   y    -> return y
+term :: Managed (View Command, Controller Token)
+term = do
+    _                  <- noBufferIn
+    _                  <- noBufferOut
+    _                  <- noEcho
+    terminal           <- managed (setupTermFromEnv >>=)
+    (decoder, encoder) <- managed $ \k -> do
+        let x = runFeature (liftA2 (,) decodeToken encodeCommand) terminal
+        case x of
+            Supported   y    -> k y
             Unsupported txts -> ioError $ userError $
                 "term: Your terminal must support one of the following \
                 \commands: " ++ unpack (intercalate ", " txts)
-        let termOut_ = View (runTermOutput terminal)
-        k (Term termIn_ decoder_ encoder_ termOut_)
+    let view = asSink (runTermOutput terminal . encoder)
+    controller <- producer Single (keyPresses >-> decoder)
+    return (view, controller)
